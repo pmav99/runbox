@@ -76,9 +76,32 @@ Each invocation creates a new directory in `./.runbox`:
   so simultaneous invocations get different numbers.
 * `latest` is a symlink to the newest run.
 * Only the 10 newest runs are kept; older ones are deleted automatically.
-* `results.json` has one entry per command: `name`, `command`, `status`
-  (`ok`, `failed`, `signaled` or `canceled`), `exit_code` (`-1` if the command could not be
-  started or was killed by a signal), optional `signal` and `error`, `duration_ms` and `log`.
+* `results.json` is described [below](#resultsjson).
+
+### results.json
+
+The machine-readable record of a run, for scripts and other tools. It is at
+`.runbox/latest/results.json` (or `.runbox/run-N/results.json`) and is written once all
+commands have finished, including after Ctrl-C. It is a JSON array with one object per
+command, in the order the `--run` options were given:
+
+```json
+[
+  {"name": "build", "command": "go build ./...", "status": "ok", "exit_code": 0, "duration_ms": 2502, "log": "build.log"},
+  {"name": "lint", "command": "ruff check .", "status": "failed", "exit_code": 1, "duration_ms": 830, "log": "lint.log"}
+]
+```
+
+* `status` is `ok`, `failed`, `signaled` (killed by a signal not sent by runbox) or
+  `canceled` (stopped by runbox after Ctrl-C/SIGTERM).
+* `exit_code` is `-1` if the command did not exit normally: it could not be started, or it was
+  killed by a signal (including by runbox when canceled). Check `status` first.
+* `log` is relative to the run directory.
+* `signal` (e.g. `"TERM"`, only when `signaled`) and `error` (only when the command
+  could not be started) are omitted otherwise.
+
+For a script, runbox's own exit status says whether everything succeeded; read
+`results.json` to find out which commands did not.
 
 ## Cancellation
 
