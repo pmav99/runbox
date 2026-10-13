@@ -1,0 +1,321 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	defaultTail = 15
+
+	// tailBytesPerLine bounds how much of a log is read per requested line,
+	// so a log with huge lines can't flood the output.
+	tailBytesPerLine = 1024
+	maxTailBytes     = 1 << 20
+
+	pathsAbs  = "abs"
+	pathsBase = "base"
+)
+
+// outputOptions selects between the two output styles: a human one for
+// terminals (live status line, aligned table, colors, short paths) and a
+// plain one for pipes, i.e. agents (one line per command as it finishes,
+// absolute paths, no escape codes).
+type outputOptions struct {
+	tty   bool
+	color bool
+	paths string // pathsAbs or pathsBase; empty means the default for the style
+}
+
+func newOutputOptions(f *os.File, paths string) outputOptions {
+	o := outputOptions{paths: paths}
+	if st, err := f.Stat(); err == nil {
+		o.tty = st.Mode()&os.ModeCharDevice != 0 && os.Getenv("TERM") != "dumb"
+	}
+	o.color = o.tty && os.Getenv("NO_COLOR") == ""
+	if o.paths == "" {
+		o.paths = pathsAbs
+		if o.tty {
+			o.paths = pathsBase
+		}
+	}
+	return o
+}
+
+// path renders a file in the run directory according to the paths policy.
+func (o outputOptions) path(dir, name string) string {
+	if o.paths == pathsBase {
+		return name
+	}
+	return filepath.Join(dir, name)
+}
+
+func (o outputOptions) paint(code, s string) string {
+	if !o.color {
+		return s
+	}
+	return "\x1b[" + code + "m" + s + "\x1b[0m"
+}
+
+// describe renders a result's status without a misleading "exit=-1": commands
+// that never started, were canceled or died from a signal get their own wording.
+func describe(r Result) string {
+	switch {
+	case r.Status == StatusOK:
+		return "OK"
+	case r.Status == StatusCanceled:
+		return "CANCELED"
+	case r.Status == StatusSignaled:
+		return "SIGNALED (" + r.Signal + ")"
+	case r.Error != "":
+		return "FAILED (could not start)"
+	default:
+		return fmt.Sprintf("FAILED exit=%d", r.ExitCode)
+	}
+}
+
+func (o outputOptions) paintStatus(r Result, s string) string {
+	switch r.Status {
+	case StatusOK:
+		return o.paint("32", s)
+	case StatusCanceled, StatusSignaled:
+		return o.paint("33", s)
+	}
+	return o.paint("31", s)
+}
+
+// formatDuration renders 2502ms as "2.5s" and 83s as "1m23s".
+func formatDuration(d time.Duration) string {
+	switch {
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	case d < time.Minute:
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	d = d.Round(time.Second)
+	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n < 1<<10:
+		return fmt.Sprintf("%d B", n)
+	case n < 1<<20:
+		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+}
+
+func resultDuration(r Result) time.Duration { return time.Duration(r.DurationMS) * time.Millisecond }
+
+// progress shows what is happening while commands run. On a terminal it keeps
+// one updating status line; otherwise it prints one line per command as it
+// finishes. Completion order is nondeterministic: results.json is the ordered
+// record. All methods are safe on a nil *progress.
+type progress struct {
+	mu      sync.Mutex
+	w       io.Writer
+	opts    outputOptions
+	dir     string
+	total   int
+	done    int
+	failed  int
+	running map[string]time.Time
+	stopCh  chan struct{}
+	wg      sync.WaitGroup
+}
+
+func newProgress(w io.Writer, opts outputOptions, dir string, total int) *progress {
+	p := &progress{w: w, opts: opts, dir: dir, total: total, running: map[string]time.Time{}, stopCh: make(chan struct{})}
+	if opts.tty {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			t := time.NewTicker(500 * time.Millisecond)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					p.mu.Lock()
+					p.draw()
+					p.mu.Unlock()
+				case <-p.stopCh:
+					return
+				}
+			}
+		}()
+	}
+	return p
+}
+
+func (p *progress) started(name string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.running[name] = time.Now()
+	p.draw()
+}
+
+func (p *progress) finished(r Result) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.running, r.Name)
+	p.done++
+	if r.Status != StatusOK && r.Status != StatusCanceled {
+		p.failed++
+	}
+	if p.opts.tty {
+		p.draw()
+		return
+	}
+	fmt.Fprintf(p.w, "%s: %s %s %s\n", r.Name, describe(r), formatDuration(resultDuration(r)), p.opts.path(p.dir, r.Log))
+}
+
+// draw redraws the status line. Callers hold p.mu.
+func (p *progress) draw() {
+	if !p.opts.tty {
+		return
+	}
+	line := fmt.Sprintf("runbox: %d/%d done", p.done, p.total)
+	if p.failed > 0 {
+		line += fmt.Sprintf(", %d failed", p.failed)
+	}
+	if len(p.running) > 0 {
+		names := make([]string, 0, len(p.running))
+		for n := range p.running {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for i, n := range names {
+			names[i] = fmt.Sprintf("%s(%v)", n, time.Since(p.running[n]).Round(time.Second))
+		}
+		line += " — running: " + strings.Join(names, ", ")
+	}
+	// Keep to one terminal row so the carriage return can erase it.
+	if r := []rune(line); len(r) > 79 {
+		line = string(r[:78]) + "…"
+	}
+	fmt.Fprint(p.w, "\r\x1b[2K"+line)
+}
+
+// stop ends the live display and erases the status line.
+func (p *progress) stop() {
+	if p == nil {
+		return
+	}
+	close(p.stopCh)
+	p.wg.Wait()
+	if p.opts.tty {
+		fmt.Fprint(p.w, "\r\x1b[2K")
+	}
+}
+
+// printReport writes the final report: on a terminal an aligned table with one
+// row per command; then the tail of every unsuccessful command's log, so no
+// follow-up read is needed; then a summary line. It reports whether any
+// command was unsuccessful. wall is the elapsed time of the whole run.
+func printReport(w io.Writer, dir string, results []Result, tail int, wall time.Duration, opts outputOptions) (failed bool) {
+	var ok, canceled int
+	for _, r := range results {
+		switch r.Status {
+		case StatusOK:
+			ok++
+		case StatusCanceled:
+			canceled++
+		}
+	}
+	if opts.tty {
+		printTable(w, dir, results, opts)
+	}
+	for _, r := range results {
+		if r.Status == StatusOK || tail == 0 {
+			continue
+		}
+		fmt.Fprintf(w, "\n--- %s: %s (last %d lines of %s) ---\n", r.Name, describe(r), tail, r.Log)
+		text, clipped, size, err := readTail(filepath.Join(dir, r.Log), tail, tailByteLimit(tail))
+		switch {
+		case err != nil:
+			fmt.Fprintf(w, "(cannot read log: %v)\n", err)
+		case text == "":
+			fmt.Fprintln(w, "(log is empty)")
+		default:
+			if clipped {
+				fmt.Fprintf(w, "(log is %s; only its last %s were read, so the output may start mid-line)\n", humanBytes(size), humanBytes(tailByteLimit(tail)))
+			}
+			fmt.Fprintln(w, text)
+		}
+	}
+	summary := fmt.Sprintf("%d/%d ok, %d failed", ok, len(results), len(results)-ok-canceled)
+	if canceled > 0 {
+		summary += fmt.Sprintf(", %d canceled", canceled)
+	}
+	fmt.Fprintf(w, "\nsummary: %s in %s; results: %s\n", summary, formatDuration(wall), opts.path(dir, "results.json"))
+	return ok != len(results)
+}
+
+func printTable(w io.Writer, dir string, results []Result, opts outputOptions) {
+	var nameW, statusW, durW int
+	durs := make([]string, len(results))
+	for i, r := range results {
+		durs[i] = formatDuration(resultDuration(r))
+		nameW = max(nameW, len(r.Name)+1)
+		statusW = max(statusW, len(describe(r)))
+		durW = max(durW, len(durs[i]))
+	}
+	for i, r := range results {
+		status := describe(r)
+		pad := strings.Repeat(" ", statusW-len(status))
+		fmt.Fprintf(w, "%-*s %s%s  %*s  %s\n", nameW, r.Name+":", opts.paintStatus(r, status), pad, durW, durs[i], opts.path(dir, r.Log))
+	}
+}
+
+// readTail returns the last n lines of the file, looking at no more than the
+// last maxBytes bytes. clipped reports that the file was larger than that
+// window and the result may therefore be incomplete or start mid-line.
+func readTail(path string, n int, maxBytes int64) (text string, clipped bool, size int64, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false, 0, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return "", false, 0, err
+	}
+	size = st.Size()
+	off := max(size-maxBytes, 0)
+	buf := make([]byte, size-off)
+	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
+		return "", false, size, err
+	}
+	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
+	if off > 0 {
+		if len(lines) > 1 {
+			lines = lines[1:] // first line is probably cut off
+		}
+		clipped = len(lines) < n || len(lines) == 1
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n"), clipped, size, nil
+}
+
+// tailByteLimit is the most bytes read from a log to show n lines.
+func tailByteLimit(n int) int64 {
+	if n > maxTailBytes/tailBytesPerLine {
+		return maxTailBytes
+	}
+	return int64(n) * tailBytesPerLine
+}

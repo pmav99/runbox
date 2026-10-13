@@ -1,0 +1,342 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestParseCommand(t *testing.T) {
+	good := map[string]Command{
+		"build=go build ./...": {"build", "go build ./..."},
+		"a.b-c_1=x=y":          {"a.b-c_1", "x=y"}, // only the first '=' splits
+	}
+	for in, want := range good {
+		got, err := parseCommand(in)
+		if err != nil || got != want {
+			t.Errorf("parseCommand(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "noequals", "=cmd", "a/b=ls", "../x=ls", ".hidden=ls", "-x=ls", "a b=ls", "name=", "name=   "} {
+		if _, err := parseCommand(in); err == nil {
+			t.Errorf("parseCommand(%q) succeeded; want error", in)
+		}
+	}
+}
+
+func TestParseCommandsDuplicatesAndEmpty(t *testing.T) {
+	if _, err := parseCommands([]string{"a=true", "a=false"}); err == nil {
+		t.Error("duplicate names accepted")
+	}
+	if _, err := parseCommands(nil); err == nil {
+		t.Error("no commands accepted")
+	}
+}
+
+func TestCreateRunDirNumbering(t *testing.T) {
+	base := filepath.Join(t.TempDir(), ".runbox")
+	for want := 1; want <= 3; want++ {
+		_, n, err := createRunDir(base)
+		if err != nil || n != want {
+			t.Fatalf("got n=%d err=%v; want %d", n, err, want)
+		}
+	}
+}
+
+func TestCreateRunDirConcurrent(t *testing.T) {
+	base := filepath.Join(t.TempDir(), ".runbox")
+	const workers = 20
+	var mu sync.Mutex
+	seen := map[int]bool{}
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, n, err := createRunDir(base)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if seen[n] {
+				t.Errorf("run number %d handed out twice", n)
+			}
+			seen[n] = true
+		}()
+	}
+	wg.Wait()
+	if len(seen) != workers {
+		t.Errorf("got %d distinct runs; want %d", len(seen), workers)
+	}
+}
+
+func TestUpdateLatest(t *testing.T) {
+	base := t.TempDir()
+	for _, n := range []int{1, 2} {
+		if err := updateLatest(base, n); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.Readlink(filepath.Join(base, "latest"))
+		if err != nil || got != fmt.Sprintf("run-%d", n) {
+			t.Errorf("latest -> %q, %v; want run-%d", got, err, n)
+		}
+	}
+}
+
+func TestPrune(t *testing.T) {
+	base := t.TempDir()
+	for i := 1; i <= 15; i++ {
+		os.Mkdir(filepath.Join(base, fmt.Sprintf("run-%d", i)), 0o755)
+	}
+	os.Mkdir(filepath.Join(base, "unrelated"), 0o755)
+	os.WriteFile(filepath.Join(base, "run-1x"), nil, 0o644)
+
+	if err := prune(base, 10, 15); err != nil {
+		t.Fatal(err)
+	}
+	nums, _ := listRuns(base)
+	if len(nums) != 10 || nums[0] != 6 || nums[9] != 15 {
+		t.Errorf("remaining runs = %v; want 6..15", nums)
+	}
+	for _, name := range []string{"unrelated", "run-1x"} {
+		if _, err := os.Stat(filepath.Join(base, name)); err != nil {
+			t.Errorf("%s was removed", name)
+		}
+	}
+}
+
+func TestRunAll(t *testing.T) {
+	dir := t.TempDir()
+	results := runAll(context.Background(), nil, dir, []Command{
+		{"ok", "echo out; echo err >&2"},
+		{"fail", "echo boom; exit 3"},
+		{"missing", "definitely-not-a-command-xyz"},
+		{"sig", "kill -TERM $$"},
+	}, nil)
+	want := []struct {
+		status string
+		code   int
+	}{{StatusOK, 0}, {StatusFailed, 3}, {StatusFailed, 127}, {StatusSignaled, -1}}
+	for i, w := range want {
+		if results[i].Status != w.status || results[i].ExitCode != w.code {
+			t.Errorf("%s: got %s/%d; want %s/%d", results[i].Name, results[i].Status, results[i].ExitCode, w.status, w.code)
+		}
+	}
+	if results[3].Signal != "TERM" {
+		t.Errorf("signal = %q; want TERM", results[3].Signal)
+	}
+	// stdout and stderr both land in the log.
+	data, _ := os.ReadFile(filepath.Join(dir, "ok.log"))
+	if s := string(data); s != "out\nerr\n" {
+		t.Errorf("ok.log = %q", s)
+	}
+}
+
+func TestRunAllIsConcurrent(t *testing.T) {
+	start := time.Now()
+	runAll(context.Background(), nil, t.TempDir(), []Command{{"a", "sleep 1"}, {"b", "sleep 1"}, {"c", "sleep 1"}}, nil)
+	if d := time.Since(start); d > 2500*time.Millisecond {
+		t.Errorf("took %v; commands do not look concurrent", d)
+	}
+}
+
+func TestRunAllCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	start := time.Now()
+	// The nested sleep checks that children of the shell are terminated too.
+	results := runAll(ctx, nil, t.TempDir(), []Command{{"slow", "sleep 30; echo unreachable"}, {"quick", "true"}}, nil)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("cancel took %v", d)
+	}
+	if results[0].Status != StatusCanceled {
+		t.Errorf("slow status = %s; want canceled", results[0].Status)
+	}
+	if results[1].Status != StatusOK {
+		t.Errorf("quick status = %s; want ok", results[1].Status)
+	}
+}
+
+func TestWriteResults(t *testing.T) {
+	dir := t.TempDir()
+	in := []Result{{Name: "a", Command: "true", Status: StatusOK, Log: "a.log"}}
+	if err := writeResults(dir, in); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "results.json"))
+	var out []Result
+	if err := json.Unmarshal(data, &out); err != nil || len(out) != 1 || out[0] != in[0] {
+		t.Errorf("round trip = %v, %v", out, err)
+	}
+}
+
+func TestRunEndToEnd(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if code := run([]string{"--run", "a=true", "--run", "b=exit 1"}); code != 1 {
+		t.Errorf("exit code = %d; want 1", code)
+	}
+	if code := run([]string{"--run", "a=true"}); code != 0 {
+		t.Errorf("exit code = %d; want 0", code)
+	}
+	if got, _ := os.Readlink(".runbox/latest"); got != "run-2" {
+		t.Errorf("latest -> %q; want run-2", got)
+	}
+	if _, err := os.Stat(".runbox/run-1/results.json"); err != nil {
+		t.Error(err)
+	}
+	if code := run([]string{"--run", "bad"}); code != 2 {
+		t.Errorf("exit code = %d; want 2", code)
+	}
+}
+
+func TestPrintReportTailOptions(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "bad.log"), []byte("a\nb\nc\n"), 0o644)
+	results := []Result{{Name: "bad", Status: StatusFailed, ExitCode: 1, Log: "bad.log"}}
+	var out strings.Builder
+	printReport(&out, dir, results, 2, 0, outputOptions{paths: pathsAbs})
+	if s := out.String(); !strings.Contains(s, "b\nc\n") || strings.Contains(s, "a\n") {
+		t.Errorf("tail=2 output wrong:\n%s", s)
+	}
+	out.Reset()
+	printReport(&out, dir, results, 0, 0, outputOptions{tty: true, paths: pathsBase})
+	if s := out.String(); strings.Contains(s, "---") || !strings.Contains(s, "bad: FAILED exit=1") {
+		t.Errorf("tail=0 output wrong:\n%s", s)
+	}
+}
+
+func TestPrintReport(t *testing.T) {
+	dir := t.TempDir()
+	var long strings.Builder
+	for i := 1; i <= 50; i++ {
+		fmt.Fprintf(&long, "line %d\n", i)
+	}
+	os.WriteFile(filepath.Join(dir, "good.log"), []byte("fine\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "bad.log"), []byte(long.String()), 0o644)
+	os.WriteFile(filepath.Join(dir, "empty.log"), nil, 0o644)
+	results := []Result{
+		{Name: "good", Status: StatusOK, Log: "good.log"},
+		{Name: "bad", Status: StatusFailed, ExitCode: 2, Log: "bad.log"},
+		{Name: "empty", Status: StatusCanceled, ExitCode: -1, Log: "empty.log"},
+	}
+	var out strings.Builder
+	if !printReport(&out, dir, results, 20, 2500*time.Millisecond, outputOptions{paths: pathsAbs}) {
+		t.Error("expected failure to be reported")
+	}
+	s := out.String()
+	for _, want := range []string{
+		"bad: FAILED exit=2 (last 20 lines of bad.log)",
+		"empty: CANCELED (last 20 lines", "in 2.5s",
+		"line 50", "line 31", "(log is empty)", "summary: 1/3 ok, 1 failed, 1 canceled",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("report missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "good: OK") || strings.Contains(s, "line 30\n") || strings.Contains(s, "fine\n") {
+		t.Errorf("report has too much log output:\n%s", s)
+	}
+}
+
+func TestRunAllForceKill(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	force := make(chan struct{})
+	time.AfterFunc(200*time.Millisecond, cancel)
+	time.AfterFunc(400*time.Millisecond, func() { close(force) })
+	start := time.Now()
+	results := runAll(ctx, force, t.TempDir(), []Command{{"stubborn", "trap '' TERM; sleep 30"}}, nil)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("force kill took %v", d)
+	}
+	if results[0].Status != StatusCanceled {
+		t.Errorf("status = %s; want canceled", results[0].Status)
+	}
+}
+
+func TestTailByteLimit(t *testing.T) {
+	if got := tailByteLimit(9_000_000_000_000_000_000); got != maxTailBytes {
+		t.Errorf("huge tail limit = %d", got)
+	}
+	if got := tailByteLimit(15); got != 15*tailBytesPerLine {
+		t.Errorf("limit = %d", got)
+	}
+}
+
+func TestRunRejectsPositionalArgs(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if code := run([]string{"--run", "x=true", "y=echo"}); code != 2 {
+		t.Errorf("exit code = %d; want 2", code)
+	}
+	if _, err := os.Stat(baseDir); err == nil {
+		t.Error("run directory created despite usage error")
+	}
+}
+
+func TestPrintReportTableAndClipping(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "big.log"), []byte(strings.Repeat("x", 200_000)), 0o644)
+	results := []Result{
+		{Name: "a", Status: StatusOK, Log: "a.log", DurationMS: 2502},
+		{Name: "big", Status: StatusSignaled, Signal: "TERM", ExitCode: -1, Log: "big.log"},
+	}
+	var out strings.Builder
+	printReport(&out, dir, results, 15, 3*time.Second, outputOptions{tty: true, paths: pathsBase})
+	s := out.String()
+	for _, want := range []string{"a:   OK", "2.5s", "SIGNALED (TERM)", "a.log", "may start mid-line", "195 KB", "in 3.0s"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("report missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, dir) || strings.Contains(s, "exit=-1") {
+		t.Errorf("base paths / signal wording violated:\n%s", s)
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		250 * time.Millisecond:  "250ms",
+		2502 * time.Millisecond: "2.5s",
+		83 * time.Second:        "1m23s",
+	} {
+		if got := formatDuration(d); got != want {
+			t.Errorf("formatDuration(%v) = %q; want %q", d, got, want)
+		}
+	}
+}
+
+func TestProgressNonTTYStreamsFinishedCommands(t *testing.T) {
+	var out strings.Builder
+	p := newProgress(&out, outputOptions{paths: pathsAbs}, "/d", 2)
+	p.started("a")
+	p.finished(Result{Name: "a", Status: StatusFailed, ExitCode: 4, Log: "a.log", DurationMS: 1200})
+	p.stop()
+	if got, want := out.String(), "a: FAILED exit=4 1.2s /d/a.log\n"; got != want {
+		t.Errorf("got %q; want %q", got, want)
+	}
+}
+
+func TestVersionFlag(t *testing.T) {
+	if code := run([]string{"--version"}); code != 0 {
+		t.Errorf("exit code = %d; want 0", code)
+	}
+	if versionString() == "" {
+		t.Error("empty version")
+	}
+}
+
+func TestHelpAndBadFlag(t *testing.T) {
+	if code := run([]string{"--help"}); code != 0 {
+		t.Errorf("--help exit code = %d; want 0", code)
+	}
+	if code := run([]string{"--bogus"}); code != 2 {
+		t.Errorf("bad flag exit code = %d; want 2", code)
+	}
+}
