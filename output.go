@@ -236,7 +236,14 @@ func (p *progress) draw() {
 	for n := range p.running {
 		names = append(names, n)
 	}
-	sort.Strings(names)
+	// Longest-running first: it is the one the user is most likely waiting
+	// on, and the last to be collapsed into "+N more".
+	sort.Slice(names, func(i, j int) bool {
+		if a, b := p.running[names[i]], p.running[names[j]]; !a.Equal(b) {
+			return a.Before(b)
+		}
+		return names[i] < names[j]
+	})
 	for i, n := range names {
 		names[i] = fmt.Sprintf("%s(%v)", n, time.Since(p.running[n]).Round(time.Second))
 	}
@@ -324,8 +331,13 @@ func printReport(w io.Writer, dir string, results []Result, tail int, wall time.
 		if r.Status == StatusOK || tail == 0 {
 			continue
 		}
-		fmt.Fprintf(w, "\n--- %s: %s (last %d lines of %s) ---\n", r.Name, describe(r), tail, r.Log)
 		text, clipped, size, err := readTail(filepath.Join(dir, r.Log), tail, tailByteLimit(tail))
+		// Only claim "last N lines" when the log was actually cut down to them.
+		what := r.Log
+		if strings.Count(text, "\n")+1 >= tail && text != "" {
+			what = fmt.Sprintf("last %d lines of %s", tail, r.Log)
+		}
+		fmt.Fprintf(w, "\n--- %s: %s (%s) ---\n", r.Name, describe(r), what)
 		switch {
 		case err != nil:
 			fmt.Fprintf(w, "(cannot read log: %v)\n", err)

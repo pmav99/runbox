@@ -235,12 +235,15 @@ func TestPrintReport(t *testing.T) {
 	s := out.String()
 	for _, want := range []string{
 		"bad: FAILED exit=2 (last 20 lines of bad.log)",
-		"empty: CANCELED (last 20 lines", "in 2.5s",
+		"empty: CANCELED (empty.log)", "in 2.5s",
 		"line 50", "line 31", "(log is empty)", "summary: 1/3 ok, 1 failed, 1 canceled",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("report missing %q:\n%s", want, s)
 		}
+	}
+	if strings.Contains(s, "last 20 lines of empty.log") {
+		t.Errorf("header claims 20 lines for an empty log:\n%s", s)
 	}
 	if strings.Contains(s, "good: OK") || strings.Contains(s, "line 30\n") || strings.Contains(s, "fine\n") {
 		t.Errorf("report has too much log output:\n%s", s)
@@ -426,5 +429,30 @@ func TestStatusLinePaintsFailedCounter(t *testing.T) {
 	want := "runbox: 2/3 done, \x1b[31m1 failed\x1b[0m — running: a(1s)"
 	if got := p.statusLine("runbox: 2/3 done, 1 failed", []string{"a(1s)"}); got != want {
 		t.Errorf("got %q; want %q", got, want)
+	}
+}
+
+func TestTailHeaderOnlyClaimsCountWhenCut(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "short.log"), []byte("a\nb\nc\n"), 0o644)
+	var out strings.Builder
+	printReport(&out, dir, []Result{{Name: "s", Status: StatusFailed, ExitCode: 1, Log: "short.log"}}, 15, time.Second, outputOptions{paths: pathsAbs})
+	if s := out.String(); !strings.Contains(s, "s: FAILED exit=1 (short.log)") || strings.Contains(s, "last 15") {
+		t.Errorf("unexpected header:\n%s", s)
+	}
+}
+
+func TestStatusLineRunningOrderLongestFirst(t *testing.T) {
+	p := newProgress(io.Discard, outputOptions{tty: true}, "/d", 2)
+	p.stop()
+	now := time.Now()
+	p.running["a"] = now
+	p.running["z"] = now.Add(-10 * time.Second)
+	var out strings.Builder
+	p.w = &out
+	p.width = func() int { return 200 }
+	p.draw()
+	if s := out.String(); strings.Index(s, "z(") > strings.Index(s, "a(") {
+		t.Errorf("longest-running not first: %q", s)
 	}
 }

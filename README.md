@@ -48,6 +48,34 @@ On a terminal it instead shows a live `1/4 done, 1 failed — running: build(12s
 line and finishes with an aligned, colored table. `results.json` is the stable,
 ordered record in both cases.
 
+Piped (e.g. `runbox ... | cat`), for `--run 'build=...' --run 'lint=...' --run 'test=...'`:
+
+```text
+runbox: running 3 commands, logs in /work/.runbox/run-1
+lint: FAILED exit=1 1ms /work/.runbox/run-1/lint.log
+build: OK 1.0s /work/.runbox/run-1/build.log
+test: OK 2.0s /work/.runbox/run-1/test.log
+
+--- lint: FAILED exit=1 (lint.log) ---
+lint: E501 line too long
+
+summary: 2/3 ok, 1 failed in 2.0s; results: /work/.runbox/run-1/results.json
+```
+
+On a terminal, after the live line has been erased:
+
+```text
+runbox: running 3 commands, logs in .runbox/run-2 (.runbox/latest)
+build: OK             1.0s  build.log
+lint:  FAILED exit=1   1ms  lint.log
+test:  OK             2.0s  test.log
+
+--- lint: FAILED exit=1 (lint.log) ---
+lint: E501 line too long
+
+summary: 2/3 ok, 1 failed in 2.0s; results: results.json
+```
+
 Color is used only on a terminal. Set [`NO_COLOR`](https://no-color.org) (to any non-empty
 value) to disable it, or `TERM=dumb` to get the plain piped-style output on a terminal. Piped output
 never contains escape codes.

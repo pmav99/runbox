@@ -195,7 +195,11 @@ func run(args []string) int {
 		shown = fmt.Sprintf("%s/%s (%s/latest)", baseDir, filepath.Base(dir), baseDir)
 	}
 	if !opts.quiet {
-		fmt.Printf("runbox: running %d commands, logs in %s\n", len(cmds), shown)
+		noun := "commands"
+		if len(cmds) == 1 {
+			noun = "command"
+		}
+		fmt.Printf("runbox: running %d %s, logs in %s\n", len(cmds), noun, shown)
 		progMu.Lock()
 		prog = newProgress(os.Stdout, opts, dir, len(cmds))
 		progMu.Unlock()
