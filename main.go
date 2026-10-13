@@ -94,6 +94,8 @@ Options:
   --run NAME=COMMAND  command to run; may be repeated
   --shell PATH        shell used to run the commands; must accept -c COMMAND
                       (default sh, looked up in PATH)
+  --timeout SECONDS   stop any command still running after this many seconds
+                      (SIGTERM, then SIGKILL after 5s); 0 means no limit (default)
   --tail N            lines of log to show for each failed command (default 15, 0 disables)
   --paths abs|base    print log paths absolute or relative to the run directory
                       (default: absolute when piped, relative on a terminal)
@@ -114,6 +116,7 @@ func run(args []string) int {
 	tail := fs.Int("tail", defaultTail, "number of log lines to show for each failed command (0 to disable)")
 	paths := fs.String("paths", "", "how log paths are printed: abs or base (default: abs when piped, base on a terminal)")
 	shell := fs.String("shell", defaultShell, "path of the shell used to run the commands; must accept -c")
+	timeout := fs.Int("timeout", 0, "seconds after which a running command is stopped (0 for no limit)")
 	quiet := fs.Bool("quiet", false, "print nothing on success")
 	fs.BoolVar(quiet, "q", false, "shorthand for --quiet")
 	showVersion := fs.Bool("version", false, "print version and exit")
@@ -142,6 +145,10 @@ func run(args []string) int {
 	}
 	if *tail < 0 {
 		fmt.Fprintln(os.Stderr, "runbox: --tail must not be negative")
+		return 2
+	}
+	if *timeout < 0 {
+		fmt.Fprintln(os.Stderr, "runbox: --timeout must not be negative")
 		return 2
 	}
 	if *paths != "" && *paths != pathsAbs && *paths != pathsBase {
@@ -214,7 +221,7 @@ func run(args []string) int {
 		progMu.Unlock()
 	}
 	start := time.Now()
-	results := runAll(ctx, force, dir, *shell, cmds, getProg())
+	results := runAll(ctx, force, dir, *shell, time.Duration(*timeout)*time.Second, cmds, getProg())
 	getProg().stop()
 	wall := time.Since(start)
 

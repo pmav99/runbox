@@ -91,6 +91,8 @@ func describe(r Result) string {
 		return "OK"
 	case r.Status == StatusCanceled:
 		return "CANCELED"
+	case r.Status == StatusTimedOut:
+		return "TIMED OUT"
 	case r.Status == StatusSignaled:
 		return "SIGNALED (" + r.Signal + ")"
 	case r.Error != "":

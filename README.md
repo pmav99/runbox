@@ -41,6 +41,10 @@ Options:
   `PATH -c COMMAND`, so it must accept `-c` (bash, zsh, dash, ...). The value is a path to an
   executable, e.g. `--shell /bin/bash`; it is not looked up in `PATH`. The default `sh` is.
   Extra shell arguments are not supported. Linux is the primary target, macOS best effort.
+* `--timeout SECONDS`: stop any command that is still running after this many seconds
+  (a whole number; default `0`, no limit). The command's process group gets `SIGTERM`, and
+  `SIGKILL` after 5 more seconds, as for [cancellation](#cancellation). It is recorded as `timed_out`
+  and counts as failed.
 * `--tail N`: show the last N lines of the log of each failed command (default 15, `0` disables).
 
 ## Output
@@ -124,7 +128,7 @@ command, in the order the `--run` options were given:
 ]
 ```
 
-* `status` is `ok`, `failed`, `signaled` (killed by a signal not sent by runbox) or
+* `status` is `ok`, `failed`, `timed_out` (stopped by runbox after `--timeout`), `signaled` (killed by a signal not sent by runbox) or
   `canceled` (stopped by runbox after Ctrl-C/SIGTERM).
 * `exit_code` is `-1` if the command did not exit normally: it could not be started, or it was
   killed by a signal (including by runbox when canceled). Check `status` first.

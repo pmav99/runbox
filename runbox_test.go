@@ -117,7 +117,7 @@ func TestPrune(t *testing.T) {
 
 func TestRunAll(t *testing.T) {
 	dir := t.TempDir()
-	results := runAll(context.Background(), nil, dir, "sh", []Command{
+	results := runAll(context.Background(), nil, dir, "sh", 0, []Command{
 		{"ok", "echo out; echo err >&2"},
 		{"fail", "echo boom; exit 3"},
 		{"missing", "definitely-not-a-command-xyz"},
@@ -144,7 +144,7 @@ func TestRunAll(t *testing.T) {
 
 func TestRunAllIsConcurrent(t *testing.T) {
 	start := time.Now()
-	runAll(context.Background(), nil, t.TempDir(), "sh", []Command{{"a", "sleep 1"}, {"b", "sleep 1"}, {"c", "sleep 1"}}, nil)
+	runAll(context.Background(), nil, t.TempDir(), "sh", 0, []Command{{"a", "sleep 1"}, {"b", "sleep 1"}, {"c", "sleep 1"}}, nil)
 	if d := time.Since(start); d > 2500*time.Millisecond {
 		t.Errorf("took %v; commands do not look concurrent", d)
 	}
@@ -155,7 +155,7 @@ func TestRunAllCancel(t *testing.T) {
 	time.AfterFunc(200*time.Millisecond, cancel)
 	start := time.Now()
 	// The nested sleep checks that children of the shell are terminated too.
-	results := runAll(ctx, nil, t.TempDir(), "sh", []Command{{"slow", "sleep 30; echo unreachable"}, {"quick", "true"}}, nil)
+	results := runAll(ctx, nil, t.TempDir(), "sh", 0, []Command{{"slow", "sleep 30; echo unreachable"}, {"quick", "true"}}, nil)
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("cancel took %v", d)
 	}
@@ -257,7 +257,7 @@ func TestRunAllForceKill(t *testing.T) {
 	time.AfterFunc(200*time.Millisecond, cancel)
 	time.AfterFunc(400*time.Millisecond, func() { close(force) })
 	start := time.Now()
-	results := runAll(ctx, force, t.TempDir(), "sh", []Command{{"stubborn", "trap '' TERM; sleep 30"}}, nil)
+	results := runAll(ctx, force, t.TempDir(), "sh", 0, []Command{{"stubborn", "trap '' TERM; sleep 30"}}, nil)
 	if d := time.Since(start); d > 3*time.Second {
 		t.Errorf("force kill took %v", d)
 	}
@@ -505,8 +505,38 @@ func TestRunAllCustomShell(t *testing.T) {
 		t.Skip("bash not installed")
 	}
 	// [[ ]] is a bashism that dash-style sh may reject.
-	results := runAll(context.Background(), nil, t.TempDir(), bash, []Command{{"a", "[[ a == a ]]"}}, nil)
+	results := runAll(context.Background(), nil, t.TempDir(), bash, 0, []Command{{"a", "[[ a == a ]]"}}, nil)
 	if results[0].Status != StatusOK || results[0].Shell != bash {
 		t.Errorf("got %+v", results[0])
+	}
+}
+
+func TestRunAllTimeout(t *testing.T) {
+	old := killGrace
+	killGrace = 300 * time.Millisecond
+	defer func() { killGrace = old }()
+
+	start := time.Now()
+	results := runAll(context.Background(), nil, t.TempDir(), "sh", 200*time.Millisecond, []Command{
+		{"slow", "sleep 30"},
+		{"stubborn", "trap '' TERM; sleep 30"},
+		{"quick", "true"},
+	}, nil)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("timeout took %v", d)
+	}
+	for i, want := range []string{StatusTimedOut, StatusTimedOut, StatusOK} {
+		if results[i].Status != want {
+			t.Errorf("%s: status = %s; want %s", results[i].Name, results[i].Status, want)
+		}
+	}
+}
+
+func TestTimeoutDoesNotOverrideCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	results := runAll(ctx, nil, t.TempDir(), "sh", time.Minute, []Command{{"slow", "sleep 30"}}, nil)
+	if results[0].Status != StatusCanceled {
+		t.Errorf("status = %s; want canceled", results[0].Status)
 	}
 }
