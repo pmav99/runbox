@@ -249,6 +249,10 @@ func (p *progress) draw() {
 func (p *progress) statusLine(head string, running []string) string {
 	avail := max(p.width()-1, 10)
 	paint := func(h string) string { return h }
+	if p.failed > 0 {
+		failed := fmt.Sprintf("%d failed", p.failed)
+		paint = func(h string) string { return strings.Replace(h, failed, p.opts.paint("31", failed), 1) }
+	}
 	if p.state != running_ {
 		msg := cancelMessage(p.state)
 		head = "runbox: " + msg

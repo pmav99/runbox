@@ -417,3 +417,14 @@ func captureStdout(t *testing.T, f func()) string {
 	b, _ := io.ReadAll(r)
 	return string(b)
 }
+
+func TestStatusLinePaintsFailedCounter(t *testing.T) {
+	p := newProgress(io.Discard, outputOptions{tty: true, color: true}, "/d", 3)
+	p.stop()
+	p.width = func() int { return 80 }
+	p.done, p.failed = 2, 1
+	want := "runbox: 2/3 done, \x1b[31m1 failed\x1b[0m — running: a(1s)"
+	if got := p.statusLine("runbox: 2/3 done, 1 failed", []string{"a(1s)"}); got != want {
+		t.Errorf("got %q; want %q", got, want)
+	}
+}
