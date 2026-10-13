@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -338,5 +339,43 @@ func TestHelpAndBadFlag(t *testing.T) {
 	}
 	if code := run([]string{"--bogus"}); code != 2 {
 		t.Errorf("bad flag exit code = %d; want 2", code)
+	}
+}
+
+func TestStatusLineFitsWidth(t *testing.T) {
+	p := newProgress(io.Discard, outputOptions{tty: true}, "/d", 6)
+	p.stop()
+	names := []string{"alpha(5s)", "bravo(5s)", "charlie(5s)", "delta(5s)", "echo(5s)", "slow(5s)"}
+	for _, w := range []int{20, 40, 60, 80, 200} {
+		p.width = func() int { return w }
+		line := p.statusLine("runbox: 0/6 done", names)
+		if n := len([]rune(line)); n >= w {
+			t.Errorf("width %d: line has %d columns: %q", w, n, line)
+		}
+	}
+	p.width = func() int { return 60 }
+	if got, want := p.statusLine("runbox: 0/6 done", names), "runbox: 0/6 done — running: alpha(5s), bravo(5s), +4 more"; got != want {
+		t.Errorf("got %q; want %q", got, want)
+	}
+}
+
+func TestStatusLineCanceling(t *testing.T) {
+	p := newProgress(io.Discard, outputOptions{tty: true}, "/d", 1)
+	p.stop()
+	p.width = func() int { return 100 }
+	p.state = canceling
+	if got := p.statusLine("x", []string{"a(1s)"}); !strings.Contains(got, "canceling… (Ctrl-C again to force)") || !strings.HasSuffix(got, "running: a(1s)") {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestTermWidthFallback(t *testing.T) {
+	t.Setenv("COLUMNS", "")
+	if got := termWidth(nil); got != defaultTermWidth {
+		t.Errorf("got %d", got)
+	}
+	t.Setenv("COLUMNS", "55")
+	if got := termWidth(nil); got != 55 {
+		t.Errorf("got %d", got)
 	}
 }

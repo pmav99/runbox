@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -167,23 +168,34 @@ func run(args []string) int {
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigs)
+	var prog *progress // set below, before any signal handling matters
+	var progMu sync.Mutex
+	getProg := func() *progress { progMu.Lock(); defer progMu.Unlock(); return prog }
 	go func() {
 		sig := <-sigs
 		received.Store(int32(sig.(syscall.Signal)))
 		cancel()
+		getProg().cancel(canceling)
 		<-sigs
 		close(force)
+		getProg().cancel(killing)
 	}()
 
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
 	}
-	fmt.Printf("runbox: running %d commands, logs in %s\n", len(cmds), dir)
 	opts := newOutputOptions(os.Stdout, *paths)
-	prog := newProgress(os.Stdout, opts, dir, len(cmds))
+	shown := dir
+	if opts.paths == pathsBase {
+		shown = fmt.Sprintf("%s/%s (%s/latest)", baseDir, filepath.Base(dir), baseDir)
+	}
+	fmt.Printf("runbox: running %d commands, logs in %s\n", len(cmds), shown)
+	progMu.Lock()
+	prog = newProgress(os.Stdout, opts, dir, len(cmds))
+	progMu.Unlock()
 	start := time.Now()
-	results := runAll(ctx, force, dir, cmds, prog)
-	prog.stop()
+	results := runAll(ctx, force, dir, cmds, getProg())
+	getProg().stop()
 	wall := time.Since(start)
 
 	if err := writeResults(dir, results); err != nil {

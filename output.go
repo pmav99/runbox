@@ -114,6 +114,15 @@ func humanBytes(n int64) string {
 
 func resultDuration(r Result) time.Duration { return time.Duration(r.DurationMS) * time.Millisecond }
 
+// cancelState is how far a shutdown requested by the user has progressed.
+type cancelState int
+
+const (
+	running_ cancelState = iota
+	canceling
+	killing
+)
+
 // progress shows what is happening while commands run. On a terminal it keeps
 // one updating status line; otherwise it prints one line per command as it
 // finishes. Completion order is nondeterministic: results.json is the ordered
@@ -127,12 +136,14 @@ type progress struct {
 	done    int
 	failed  int
 	running map[string]time.Time
+	state   cancelState
+	width   func() int // current terminal width; re-read on every draw
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
 }
 
 func newProgress(w io.Writer, opts outputOptions, dir string, total int) *progress {
-	p := &progress{w: w, opts: opts, dir: dir, total: total, running: map[string]time.Time{}, stopCh: make(chan struct{})}
+	p := &progress{w: w, opts: opts, dir: dir, total: total, running: map[string]time.Time{}, width: func() int { return termWidth(w) }, stopCh: make(chan struct{})}
 	if opts.tty {
 		p.wg.Add(1)
 		go func() {
@@ -176,10 +187,39 @@ func (p *progress) finished(r Result) {
 		p.failed++
 	}
 	if p.opts.tty {
+		if p.state != running_ {
+			// Say how each command died while the shutdown is in progress.
+			fmt.Fprintf(p.w, "\r\x1b[2K%s: %s %s\n", r.Name, p.opts.paintStatus(r, describe(r)), formatDuration(resultDuration(r)))
+		}
 		p.draw()
 		return
 	}
 	fmt.Fprintf(p.w, "%s: %s %s %s\n", r.Name, describe(r), formatDuration(resultDuration(r)), p.opts.path(p.dir, r.Log))
+}
+
+// cancel tells the user that shutdown is underway (or being forced).
+func (p *progress) cancel(s cancelState) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if s <= p.state {
+		return
+	}
+	p.state = s
+	if !p.opts.tty {
+		fmt.Fprintln(p.w, "runbox: "+cancelMessage(s))
+		return
+	}
+	p.draw()
+}
+
+func cancelMessage(s cancelState) string {
+	if s == killing {
+		return "killing commands…"
+	}
+	return "canceling… (Ctrl-C again to force)"
 }
 
 // draw redraws the status line. Callers hold p.mu.
@@ -187,26 +227,60 @@ func (p *progress) draw() {
 	if !p.opts.tty {
 		return
 	}
-	line := fmt.Sprintf("runbox: %d/%d done", p.done, p.total)
+	head := fmt.Sprintf("runbox: %d/%d done", p.done, p.total)
 	if p.failed > 0 {
-		line += fmt.Sprintf(", %d failed", p.failed)
+		head += fmt.Sprintf(", %d failed", p.failed)
 	}
-	if len(p.running) > 0 {
-		names := make([]string, 0, len(p.running))
-		for n := range p.running {
-			names = append(names, n)
+	names := make([]string, 0, len(p.running))
+	for n := range p.running {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for i, n := range names {
+		names[i] = fmt.Sprintf("%s(%v)", n, time.Since(p.running[n]).Round(time.Second))
+	}
+	fmt.Fprint(p.w, "\r\x1b[2K"+p.statusLine(head, names))
+}
+
+// statusLine fits the status into one terminal row (a wrapped line couldn't
+// be erased by a carriage return), dropping running commands from the end of
+// the list in favor of a "+N more" count instead of chopping names.
+func (p *progress) statusLine(head string, running []string) string {
+	avail := max(p.width()-1, 10)
+	paint := func(h string) string { return h }
+	if p.state != running_ {
+		msg := cancelMessage(p.state)
+		head = "runbox: " + msg
+		paint = func(string) string { return "runbox: " + p.opts.paint("33", msg) }
+	}
+	n := len(running)
+	for k := n; k >= 1; k-- {
+		tail := " — running: " + strings.Join(running[:k], ", ")
+		if k < n {
+			tail += fmt.Sprintf(", +%d more", n-k)
 		}
-		sort.Strings(names)
-		for i, n := range names {
-			names[i] = fmt.Sprintf("%s(%v)", n, time.Since(p.running[n]).Round(time.Second))
+		if runeLen(head+tail) <= avail {
+			return paint(head) + tail
 		}
-		line += " — running: " + strings.Join(names, ", ")
 	}
-	// Keep to one terminal row so the carriage return can erase it.
-	if r := []rune(line); len(r) > 79 {
-		line = string(r[:78]) + "…"
+	if n > 0 {
+		if tail := fmt.Sprintf(" — %d running", n); runeLen(head+tail) <= avail {
+			return paint(head) + tail
+		}
 	}
-	fmt.Fprint(p.w, "\r\x1b[2K"+line)
+	if runeLen(head) <= avail {
+		return paint(head)
+	}
+	return truncate(head, avail)
+}
+
+func runeLen(s string) int { return len([]rune(s)) }
+
+func truncate(s string, w int) string {
+	if r := []rune(s); len(r) > w {
+		return string(r[:w-1]) + "…"
+	}
+	return s
 }
 
 // stop ends the live display and erases the status line.
