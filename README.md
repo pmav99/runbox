@@ -48,6 +48,10 @@ On a terminal it instead shows a live `1/4 done, 1 failed — running: build(12s
 line and finishes with an aligned, colored table. `results.json` is the stable,
 ordered record in both cases.
 
+Color is used only on a terminal. Set [`NO_COLOR`](https://no-color.org) (to any non-empty
+value) to disable it, or `TERM=dumb` to get the plain piped-style output on a terminal. Piped output
+never contains escape codes.
+
 Statuses: `OK`, `FAILED exit=N`, `FAILED (could not start)`, `SIGNALED (TERM)`
 (killed by a signal) and `CANCELED` (stopped by runbox after Ctrl-C/SIGTERM).
 When a log is too large to read in full, the report says so.
