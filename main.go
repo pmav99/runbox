@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	baseDir  = ".runbox"
-	keepRuns = 10
+	defaultShell = "sh"
+	baseDir      = ".runbox"
+	keepRuns     = 10
 )
 
 // version is set at build time with -ldflags "-X main.version=..."; when empty
@@ -86,11 +87,13 @@ func parseCommands(args []string) ([]Command, error) {
 
 const usage = `Usage: runbox --run NAME=COMMAND [--run NAME=COMMAND ...]
 
-Runs all commands concurrently through sh -c and saves each one's output to
+Runs all commands concurrently through SHELL -c (default sh) and saves each one's output to
 .runbox/run-N/NAME.log (.runbox/latest points at the newest run).
 
 Options:
   --run NAME=COMMAND  command to run; may be repeated
+  --shell PATH        shell used to run the commands; must accept -c COMMAND
+                      (default sh, looked up in PATH)
   --tail N            lines of log to show for each failed command (default 15, 0 disables)
   --paths abs|base    print log paths absolute or relative to the run directory
                       (default: absolute when piped, relative on a terminal)
@@ -110,6 +113,7 @@ func run(args []string) int {
 	fs := flag.NewFlagSet("runbox", flag.ContinueOnError)
 	tail := fs.Int("tail", defaultTail, "number of log lines to show for each failed command (0 to disable)")
 	paths := fs.String("paths", "", "how log paths are printed: abs or base (default: abs when piped, base on a terminal)")
+	shell := fs.String("shell", defaultShell, "path of the shell used to run the commands; must accept -c")
 	quiet := fs.Bool("quiet", false, "print nothing on success")
 	fs.BoolVar(quiet, "q", false, "shorthand for --quiet")
 	showVersion := fs.Bool("version", false, "print version and exit")
@@ -142,6 +146,10 @@ func run(args []string) int {
 	}
 	if *paths != "" && *paths != pathsAbs && *paths != pathsBase {
 		fmt.Fprintln(os.Stderr, "runbox: --paths must be abs or base")
+		return 2
+	}
+	if err := checkShell(*shell); err != nil {
+		fmt.Fprintln(os.Stderr, "runbox:", err)
 		return 2
 	}
 	cmds, err := parseCommands(runArgs)
@@ -206,7 +214,7 @@ func run(args []string) int {
 		progMu.Unlock()
 	}
 	start := time.Now()
-	results := runAll(ctx, force, dir, cmds, getProg())
+	results := runAll(ctx, force, dir, *shell, cmds, getProg())
 	getProg().stop()
 	wall := time.Since(start)
 
@@ -222,6 +230,23 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// checkShell verifies that shell is an executable regular file, so a typo is
+// reported once instead of as a start failure of every command. The default
+// "sh" is the one name that is looked up in PATH; any other value is a path.
+func checkShell(shell string) error {
+	if shell == defaultShell {
+		return nil
+	}
+	fi, err := os.Stat(shell)
+	if err != nil {
+		return fmt.Errorf("invalid --shell: %v", err)
+	}
+	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("invalid --shell %q: not an executable file", shell)
+	}
+	return nil
 }
 
 func writeResults(dir string, results []Result) error {

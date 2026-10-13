@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -116,7 +117,7 @@ func TestPrune(t *testing.T) {
 
 func TestRunAll(t *testing.T) {
 	dir := t.TempDir()
-	results := runAll(context.Background(), nil, dir, []Command{
+	results := runAll(context.Background(), nil, dir, "sh", []Command{
 		{"ok", "echo out; echo err >&2"},
 		{"fail", "echo boom; exit 3"},
 		{"missing", "definitely-not-a-command-xyz"},
@@ -143,7 +144,7 @@ func TestRunAll(t *testing.T) {
 
 func TestRunAllIsConcurrent(t *testing.T) {
 	start := time.Now()
-	runAll(context.Background(), nil, t.TempDir(), []Command{{"a", "sleep 1"}, {"b", "sleep 1"}, {"c", "sleep 1"}}, nil)
+	runAll(context.Background(), nil, t.TempDir(), "sh", []Command{{"a", "sleep 1"}, {"b", "sleep 1"}, {"c", "sleep 1"}}, nil)
 	if d := time.Since(start); d > 2500*time.Millisecond {
 		t.Errorf("took %v; commands do not look concurrent", d)
 	}
@@ -154,7 +155,7 @@ func TestRunAllCancel(t *testing.T) {
 	time.AfterFunc(200*time.Millisecond, cancel)
 	start := time.Now()
 	// The nested sleep checks that children of the shell are terminated too.
-	results := runAll(ctx, nil, t.TempDir(), []Command{{"slow", "sleep 30; echo unreachable"}, {"quick", "true"}}, nil)
+	results := runAll(ctx, nil, t.TempDir(), "sh", []Command{{"slow", "sleep 30; echo unreachable"}, {"quick", "true"}}, nil)
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("cancel took %v", d)
 	}
@@ -256,7 +257,7 @@ func TestRunAllForceKill(t *testing.T) {
 	time.AfterFunc(200*time.Millisecond, cancel)
 	time.AfterFunc(400*time.Millisecond, func() { close(force) })
 	start := time.Now()
-	results := runAll(ctx, force, t.TempDir(), []Command{{"stubborn", "trap '' TERM; sleep 30"}}, nil)
+	results := runAll(ctx, force, t.TempDir(), "sh", []Command{{"stubborn", "trap '' TERM; sleep 30"}}, nil)
 	if d := time.Since(start); d > 3*time.Second {
 		t.Errorf("force kill took %v", d)
 	}
@@ -476,5 +477,36 @@ func TestPipedOutputHasNoEscapes(t *testing.T) {
 	out := captureStdout(t, func() { run([]string{"--run", "a=true", "--run", "b=exit 1"}) })
 	if strings.Contains(out, "\x1b") {
 		t.Errorf("piped output has escapes: %q", out)
+	}
+}
+
+func TestCheckShell(t *testing.T) {
+	if err := checkShell("sh"); err != nil {
+		t.Errorf("default shell rejected: %v", err)
+	}
+	if err := checkShell("/nonexistent/shell"); err == nil {
+		t.Error("missing shell accepted")
+	}
+	if err := checkShell(t.TempDir()); err == nil {
+		t.Error("directory accepted as shell")
+	}
+	plain := filepath.Join(t.TempDir(), "plain")
+	if err := os.WriteFile(plain, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkShell(plain); err == nil {
+		t.Error("non-executable file accepted as shell")
+	}
+}
+
+func TestRunAllCustomShell(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not installed")
+	}
+	// [[ ]] is a bashism that dash-style sh may reject.
+	results := runAll(context.Background(), nil, t.TempDir(), bash, []Command{{"a", "[[ a == a ]]"}}, nil)
+	if results[0].Status != StatusOK || results[0].Shell != bash {
+		t.Errorf("got %+v", results[0])
 	}
 }

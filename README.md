@@ -22,7 +22,7 @@ runbox \
 ```
 
 Each `--run` is `NAME=COMMAND`. The text before the first `=` is the name; the
-rest is passed to `sh -c`. Names may contain letters, digits, `.`, `_` and `-`
+rest is passed to `sh -c` (see `--shell`). Names may contain letters, digits, `.`, `_` and `-`
 (and must start with a letter or digit), and must be unique.
 
 All commands start at once. stdout and stderr of each command go to one log file.
@@ -37,6 +37,10 @@ Options:
   (default: absolute when stdout is piped, relative on a terminal).
 * `--quiet`, `-q`: print nothing when everything succeeds. On failure, print only the
   failed commands' log tails and the summary. `results.json` and exit codes are unchanged.
+* `--shell PATH`: run the commands with this shell instead of `sh`. It is used as
+  `PATH -c COMMAND`, so it must accept `-c` (bash, zsh, dash, ...). The value is a path to an
+  executable, e.g. `--shell /bin/bash`; it is not looked up in `PATH`. The default `sh` is.
+  Extra shell arguments are not supported. Linux is the primary target, macOS best effort.
 * `--tail N`: show the last N lines of the log of each failed command (default 15, `0` disables).
 
 ## Output
@@ -115,8 +119,8 @@ command, in the order the `--run` options were given:
 
 ```json
 [
-  {"name": "build", "command": "go build ./...", "status": "ok", "exit_code": 0, "duration_ms": 2502, "log": "build.log"},
-  {"name": "lint", "command": "ruff check .", "status": "failed", "exit_code": 1, "duration_ms": 830, "log": "lint.log"}
+  {"name": "build", "command": "go build ./...", "shell": "sh", "status": "ok", "exit_code": 0, "duration_ms": 2502, "log": "build.log"},
+  {"name": "lint", "command": "ruff check .", "shell": "sh", "status": "failed", "exit_code": 1, "duration_ms": 830, "log": "lint.log"}
 ]
 ```
 
@@ -124,6 +128,7 @@ command, in the order the `--run` options were given:
   `canceled` (stopped by runbox after Ctrl-C/SIGTERM).
 * `exit_code` is `-1` if the command did not exit normally: it could not be started, or it was
   killed by a signal (including by runbox when canceled). Check `status` first.
+* `shell` is the `--shell` value the command was run with (`sh` by default).
 * `log` is relative to the run directory.
 * `signal` (e.g. `"TERM"`, only when `signaled`) and `error` (only when the command
   could not be started) are omitted otherwise.

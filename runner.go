@@ -31,6 +31,7 @@ const killGrace = 5 * time.Second
 type Result struct {
 	Name       string `json:"name"`
 	Command    string `json:"command"`
+	Shell      string `json:"shell"`
 	Status     string `json:"status"`
 	ExitCode   int    `json:"exit_code"`
 	DurationMS int64  `json:"duration_ms"`
@@ -42,7 +43,7 @@ type Result struct {
 // runAll runs every command concurrently and returns results in input order.
 // Cancelling ctx sends the running commands SIGTERM; closing force (or
 // waiting killGrace) escalates to SIGKILL.
-func runAll(ctx context.Context, force <-chan struct{}, dir string, cmds []Command, p *progress) []Result {
+func runAll(ctx context.Context, force <-chan struct{}, dir, shell string, cmds []Command, p *progress) []Result {
 	results := make([]Result, len(cmds))
 	var wg sync.WaitGroup
 	for i, c := range cmds {
@@ -50,7 +51,7 @@ func runAll(ctx context.Context, force <-chan struct{}, dir string, cmds []Comma
 		go func() {
 			defer wg.Done()
 			p.started(c.Name)
-			results[i] = runOne(ctx, force, dir, c)
+			results[i] = runOne(ctx, force, dir, shell, c)
 			p.finished(results[i])
 		}()
 	}
@@ -58,8 +59,8 @@ func runAll(ctx context.Context, force <-chan struct{}, dir string, cmds []Comma
 	return results
 }
 
-func runOne(ctx context.Context, force <-chan struct{}, dir string, c Command) (r Result) {
-	r = Result{Name: c.Name, Command: c.Shell, Log: c.Name + ".log", ExitCode: -1, Status: StatusFailed}
+func runOne(ctx context.Context, force <-chan struct{}, dir, shell string, c Command) (r Result) {
+	r = Result{Name: c.Name, Command: c.Shell, Shell: shell, Log: c.Name + ".log", ExitCode: -1, Status: StatusFailed}
 	start := time.Now()
 	defer func() { r.DurationMS = time.Since(start).Milliseconds() }()
 
@@ -70,7 +71,7 @@ func runOne(ctx context.Context, force <-chan struct{}, dir string, c Command) (
 	}
 	defer log.Close()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", c.Shell)
+	cmd := exec.CommandContext(ctx, shell, "-c", c.Shell)
 	cmd.Stdout = log // same file for both: output is interleaved in order
 	cmd.Stderr = log
 	// Own process group, so cancellation also reaches the shell's children.
