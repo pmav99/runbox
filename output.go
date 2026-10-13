@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,6 +31,7 @@ const (
 type outputOptions struct {
 	tty   bool
 	color bool
+	links bool   // wrap paths in OSC 8 hyperlinks (terminals only)
 	quiet bool   // print only failures: no header, progress, table or success summary
 	paths string // pathsAbs or pathsBase; empty means the default for the style
 }
@@ -40,6 +42,7 @@ func newOutputOptions(f *os.File, paths string) outputOptions {
 		o.tty = st.Mode()&os.ModeCharDevice != 0 && os.Getenv("TERM") != "dumb"
 	}
 	o.color = o.tty && os.Getenv("NO_COLOR") == ""
+	o.links = o.color
 	if o.paths == "" {
 		o.paths = pathsAbs
 		if o.tty {
@@ -55,6 +58,22 @@ func (o outputOptions) path(dir, name string) string {
 		return name
 	}
 	return filepath.Join(dir, name)
+}
+
+// link renders text as a clickable file:// hyperlink to path (OSC 8) when
+// links are enabled, and as plain text otherwise.
+func (o outputOptions) link(path, text string) string {
+	if !o.links || !filepath.IsAbs(path) {
+		return text
+	}
+	host, _ := os.Hostname()
+	u := url.URL{Scheme: "file", Host: host, Path: path}
+	return "\x1b]8;;" + u.String() + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
+
+// pathLink is path, linked to the file's absolute location.
+func (o outputOptions) pathLink(dir, name string) string {
+	return o.link(filepath.Join(dir, name), o.path(dir, name))
 }
 
 func (o outputOptions) paint(code, s string) string {
@@ -333,9 +352,9 @@ func printReport(w io.Writer, dir string, results []Result, tail int, wall time.
 		}
 		text, clipped, size, err := readTail(filepath.Join(dir, r.Log), tail, tailByteLimit(tail))
 		// Only claim "last N lines" when the log was actually cut down to them.
-		what := r.Log
+		what := opts.link(filepath.Join(dir, r.Log), r.Log)
 		if strings.Count(text, "\n")+1 >= tail && text != "" {
-			what = fmt.Sprintf("last %d lines of %s", tail, r.Log)
+			what = fmt.Sprintf("last %d lines of %s", tail, what)
 		}
 		fmt.Fprintf(w, "\n--- %s: %s (%s) ---\n", r.Name, describe(r), what)
 		switch {
@@ -354,7 +373,7 @@ func printReport(w io.Writer, dir string, results []Result, tail int, wall time.
 	if canceled > 0 {
 		summary += fmt.Sprintf(", %d canceled", canceled)
 	}
-	fmt.Fprintf(w, "\nsummary: %s in %s; results: %s\n", summary, formatDuration(wall), opts.path(dir, "results.json"))
+	fmt.Fprintf(w, "\nsummary: %s in %s; results: %s\n", summary, formatDuration(wall), opts.pathLink(dir, "results.json"))
 	return ok != len(results)
 }
 
@@ -370,7 +389,7 @@ func printTable(w io.Writer, dir string, results []Result, opts outputOptions) {
 	for i, r := range results {
 		status := describe(r)
 		pad := strings.Repeat(" ", statusW-len(status))
-		fmt.Fprintf(w, "%-*s %s%s  %*s  %s\n", nameW, r.Name+":", opts.paintStatus(r, status), pad, durW, durs[i], opts.path(dir, r.Log))
+		fmt.Fprintf(w, "%-*s %s%s  %*s  %s\n", nameW, r.Name+":", opts.paintStatus(r, status), pad, durW, durs[i], opts.pathLink(dir, r.Log))
 	}
 }
 

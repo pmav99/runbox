@@ -456,3 +456,25 @@ func TestStatusLineRunningOrderLongestFirst(t *testing.T) {
 		t.Errorf("longest-running not first: %q", s)
 	}
 }
+
+func TestLinks(t *testing.T) {
+	on := outputOptions{links: true}
+	got := on.link("/tmp/a b/x.log", "x.log")
+	if !strings.HasPrefix(got, "\x1b]8;;file://") || !strings.Contains(got, "/tmp/a%20b/x.log\x1b\\x.log\x1b]8;;\x1b\\") {
+		t.Errorf("link = %q", got)
+	}
+	if got := (outputOptions{}).link("/tmp/x.log", "x.log"); got != "x.log" {
+		t.Errorf("links off: %q", got)
+	}
+	if got := on.link("rel/x.log", "x.log"); got != "x.log" {
+		t.Errorf("relative path was linked: %q", got)
+	}
+}
+
+func TestPipedOutputHasNoEscapes(t *testing.T) {
+	t.Chdir(t.TempDir())
+	out := captureStdout(t, func() { run([]string{"--run", "a=true", "--run", "b=exit 1"}) })
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("piped output has escapes: %q", out)
+	}
+}

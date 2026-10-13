@@ -194,6 +194,7 @@ func run(args []string) int {
 	if opts.paths == pathsBase {
 		shown = fmt.Sprintf("%s/%s (%s/latest)", baseDir, filepath.Base(dir), baseDir)
 	}
+	shown = opts.link(dir, shown)
 	if !opts.quiet {
 		noun := "commands"
 		if len(cmds) == 1 {
