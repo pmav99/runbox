@@ -35,6 +35,8 @@ Options:
 * `--version`: print the version and exit.
 * `--paths abs|base`: print log paths absolute or relative to the run directory
   (default: absolute when stdout is piped, relative on a terminal).
+* `--quiet`, `-q`: print nothing when everything succeeds. On failure, print only the
+  failed commands' log tails and the summary. `results.json` and exit codes are unchanged.
 * `--tail N`: show the last N lines of the log of each failed command (default 15, `0` disables).
 
 ## Output

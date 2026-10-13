@@ -379,3 +379,41 @@ func TestTermWidthFallback(t *testing.T) {
 		t.Errorf("got %d", got)
 	}
 }
+
+func TestQuiet(t *testing.T) {
+	t.Chdir(t.TempDir())
+	out := captureStdout(t, func() {
+		if code := run([]string{"-q", "--run", "a=true"}); code != 0 {
+			t.Errorf("exit code = %d; want 0", code)
+		}
+	})
+	if out != "" {
+		t.Errorf("quiet success printed %q", out)
+	}
+	out = captureStdout(t, func() {
+		if code := run([]string{"--quiet", "--run", "a=true", "--run", "b=echo boom; exit 3"}); code != 1 {
+			t.Errorf("exit code = %d; want 1", code)
+		}
+	})
+	if strings.Contains(out, "runbox: running") || strings.Contains(out, "a:") {
+		t.Errorf("quiet failure printed header or success lines: %q", out)
+	}
+	if !strings.Contains(out, "boom") || !strings.Contains(out, "summary: 1/2 ok, 1 failed") {
+		t.Errorf("quiet failure missing tail or summary: %q", out)
+	}
+}
+
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	f()
+	w.Close()
+	b, _ := io.ReadAll(r)
+	return string(b)
+}

@@ -94,6 +94,8 @@ Options:
   --tail N            lines of log to show for each failed command (default 15, 0 disables)
   --paths abs|base    print log paths absolute or relative to the run directory
                       (default: absolute when piped, relative on a terminal)
+  --quiet, -q         print nothing on success; on failure print only the failed
+                      commands' log tails and the summary
   --version           print version and exit
   --help              show this help
 
@@ -108,6 +110,8 @@ func run(args []string) int {
 	fs := flag.NewFlagSet("runbox", flag.ContinueOnError)
 	tail := fs.Int("tail", defaultTail, "number of log lines to show for each failed command (0 to disable)")
 	paths := fs.String("paths", "", "how log paths are printed: abs or base (default: abs when piped, base on a terminal)")
+	quiet := fs.Bool("quiet", false, "print nothing on success")
+	fs.BoolVar(quiet, "q", false, "shorthand for --quiet")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	fs.Func("run", "`NAME=COMMAND` to run; may be repeated", func(s string) error {
 		runArgs = append(runArgs, s)
@@ -185,14 +189,17 @@ func run(args []string) int {
 		dir = abs
 	}
 	opts := newOutputOptions(os.Stdout, *paths)
+	opts.quiet = *quiet
 	shown := dir
 	if opts.paths == pathsBase {
 		shown = fmt.Sprintf("%s/%s (%s/latest)", baseDir, filepath.Base(dir), baseDir)
 	}
-	fmt.Printf("runbox: running %d commands, logs in %s\n", len(cmds), shown)
-	progMu.Lock()
-	prog = newProgress(os.Stdout, opts, dir, len(cmds))
-	progMu.Unlock()
+	if !opts.quiet {
+		fmt.Printf("runbox: running %d commands, logs in %s\n", len(cmds), shown)
+		progMu.Lock()
+		prog = newProgress(os.Stdout, opts, dir, len(cmds))
+		progMu.Unlock()
+	}
 	start := time.Now()
 	results := runAll(ctx, force, dir, cmds, getProg())
 	getProg().stop()

@@ -30,6 +30,7 @@ const (
 type outputOptions struct {
 	tty   bool
 	color bool
+	quiet bool   // print only failures: no header, progress, table or success summary
 	paths string // pathsAbs or pathsBase; empty means the default for the style
 }
 
@@ -309,7 +310,10 @@ func printReport(w io.Writer, dir string, results []Result, tail int, wall time.
 			canceled++
 		}
 	}
-	if opts.tty {
+	if opts.quiet && ok == len(results) {
+		return false
+	}
+	if opts.tty && !opts.quiet {
 		printTable(w, dir, results, opts)
 	}
 	for _, r := range results {
