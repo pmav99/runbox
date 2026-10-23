@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/url"
@@ -352,17 +353,28 @@ func printReport(w io.Writer, dir string, results []Result, tail int, wall time.
 		if r.Status == StatusOK || tail == 0 {
 			continue
 		}
-		text, clipped, size, err := readTail(filepath.Join(dir, r.Log), tail, tailByteLimit(tail))
-		// Only claim "last N lines" when the log was actually cut down to them.
+		text, clipped, size, totalLines, err := readTail(filepath.Join(dir, r.Log), tail, tailByteLimit(tail))
 		what := opts.link(filepath.Join(dir, r.Log), r.Log)
-		if strings.Count(text, "\n")+1 >= tail && text != "" {
-			what = fmt.Sprintf("last %d lines of %s", tail, what)
+		if err == nil {
+			shown := 0
+			if size > 0 {
+				shown = strings.Count(text, "\n") + 1
+			}
+			if totalLines > int64(shown) {
+				what = fmt.Sprintf("last %d of %d lines in %s", shown, totalLines, what)
+			} else {
+				unit := "lines"
+				if totalLines == 1 {
+					unit = "line"
+				}
+				what = fmt.Sprintf("%d %s in %s", totalLines, unit, what)
+			}
 		}
 		fmt.Fprintf(w, "\n--- %s: %s (%s) ---\n", r.Name, describe(r), what)
 		switch {
 		case err != nil:
 			fmt.Fprintf(w, "(cannot read log: %v)\n", err)
-		case text == "":
+		case size == 0:
 			fmt.Fprintln(w, "(log is empty)")
 		default:
 			if clipped {
@@ -395,26 +407,45 @@ func printTable(w io.Writer, dir string, results []Result, opts outputOptions) {
 	}
 }
 
-// readTail returns the last n lines of the file, looking at no more than the
-// last maxBytes bytes. clipped reports that the file was larger than that
-// window and the result may therefore be incomplete or start mid-line.
-func readTail(path string, n int, maxBytes int64) (text string, clipped bool, size int64, err error) {
+// readTail returns the last n lines and the total line count, looking at no
+// more than the last maxBytes bytes for display. Counting scans the whole file
+// in fixed-size chunks. clipped reports that the displayed text may be
+// incomplete or start mid-line.
+func readTail(path string, n int, maxBytes int64) (text string, clipped bool, size int64, totalLines int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", false, 0, err
+		return "", false, 0, 0, err
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return "", false, 0, err
+		return "", false, 0, 0, err
 	}
 	size = st.Size()
-	off := max(size-maxBytes, 0)
-	buf := make([]byte, size-off)
-	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
-		return "", false, size, err
+	buf := make([]byte, 32*1024)
+	var last byte
+	for {
+		read, readErr := f.Read(buf)
+		if read > 0 {
+			totalLines += int64(bytes.Count(buf[:read], []byte{'\n'}))
+			last = buf[read-1]
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return "", false, size, 0, readErr
+		}
 	}
-	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
+	if size > 0 && last != '\n' {
+		totalLines++
+	}
+	off := max(size-maxBytes, 0)
+	tailBuf := make([]byte, size-off)
+	if _, err := f.ReadAt(tailBuf, off); err != nil && err != io.EOF {
+		return "", false, size, 0, err
+	}
+	lines := strings.Split(strings.TrimSuffix(string(tailBuf), "\n"), "\n")
 	if off > 0 {
 		if len(lines) > 1 {
 			lines = lines[1:] // first line is probably cut off
@@ -424,7 +455,7 @@ func readTail(path string, n int, maxBytes int64) (text string, clipped bool, si
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}
-	return strings.Join(lines, "\n"), clipped, size, nil
+	return strings.Join(lines, "\n"), clipped, size, totalLines, nil
 }
 
 // tailByteLimit is the most bytes read from a log to show n lines.

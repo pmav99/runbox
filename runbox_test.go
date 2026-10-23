@@ -235,8 +235,8 @@ func TestPrintReport(t *testing.T) {
 	}
 	s := out.String()
 	for _, want := range []string{
-		"bad: FAILED exit=2 (last 20 lines of bad.log)",
-		"empty: CANCELED (empty.log)", "in 2.5s",
+		"bad: FAILED exit=2 (last 20 of 50 lines in bad.log)",
+		"empty: CANCELED (0 lines in empty.log)", "in 2.5s",
 		"line 50", "line 31", "(log is empty)", "summary: 1/3 ok, 1 failed, 1 canceled",
 	} {
 		if !strings.Contains(s, want) {
@@ -438,8 +438,32 @@ func TestTailHeaderOnlyClaimsCountWhenCut(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "short.log"), []byte("a\nb\nc\n"), 0o644)
 	var out strings.Builder
 	printReport(&out, dir, []Result{{Name: "s", Status: StatusFailed, ExitCode: 1, Log: "short.log"}}, 15, time.Second, outputOptions{paths: pathsAbs})
-	if s := out.String(); !strings.Contains(s, "s: FAILED exit=1 (short.log)") || strings.Contains(s, "last 15") {
+	if s := out.String(); !strings.Contains(s, "s: FAILED exit=1 (3 lines in short.log)") || strings.Contains(s, "last 15") {
 		t.Errorf("unexpected header:\n%s", s)
+	}
+}
+
+func TestTailHeaderCountsLinesWithoutFinalNewline(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "odd.log"), []byte("first\nsecond\nthird"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	printReport(&out, dir, []Result{{Name: "odd", Status: StatusFailed, ExitCode: 1, Log: "odd.log"}}, 2, 0, outputOptions{paths: pathsBase})
+	if s := out.String(); !strings.Contains(s, "last 2 of 3 lines in odd.log") || !strings.Contains(s, "second\nthird\n") || strings.Contains(s, "first\n") {
+		t.Errorf("unexpected report:\n%s", s)
+	}
+}
+
+func TestTailHeaderCountsBlankLines(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "blank.log"), []byte("\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	printReport(&out, dir, []Result{{Name: "blank", Status: StatusFailed, ExitCode: 1, Log: "blank.log"}}, 1, 0, outputOptions{paths: pathsBase})
+	if s := out.String(); !strings.Contains(s, "last 1 of 2 lines in blank.log") || strings.Contains(s, "(log is empty)") {
+		t.Errorf("unexpected report:\n%s", s)
 	}
 }
 

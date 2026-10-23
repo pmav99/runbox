@@ -46,6 +46,7 @@ Options:
   `SIGKILL` after 5 more seconds, as for [cancellation](#cancellation). It is recorded as `timed_out`
   and counts as failed.
 * `--tail N`: show the last N lines of the log of each failed command (default 15, `0` disables).
+  Each failure header shows the log's total line count and how many lines are displayed.
 
 ## Output
 
@@ -64,7 +65,7 @@ lint: FAILED exit=1 1ms /work/.runbox/run-1/lint.log
 build: OK 1.0s /work/.runbox/run-1/build.log
 test: OK 2.0s /work/.runbox/run-1/test.log
 
---- lint: FAILED exit=1 (lint.log) ---
+--- lint: FAILED exit=1 (1 line in lint.log) ---
 lint: E501 line too long
 
 summary: 2/3 ok, 1 failed in 2.0s; results: /work/.runbox/run-1/results.json
@@ -78,7 +79,7 @@ build: OK             1.0s  build.log
 lint:  FAILED exit=1   1ms  lint.log
 test:  OK             2.0s  test.log
 
---- lint: FAILED exit=1 (lint.log) ---
+--- lint: FAILED exit=1 (1 line in lint.log) ---
 lint: E501 line too long
 
 summary: 2/3 ok, 1 failed in 2.0s; results: results.json
@@ -91,6 +92,7 @@ never contains escape codes.
 Statuses: `OK`, `FAILED exit=N`, `FAILED (could not start)`, `SIGNALED (TERM)`
 (killed by a signal) and `CANCELED` (stopped by runbox after Ctrl-C/SIGTERM).
 When a log is too large to read in full, the report says so.
+Log line counts include blank lines and are not counts of tool errors.
 
 ### Run directory
 
