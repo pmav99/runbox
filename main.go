@@ -216,10 +216,10 @@ func run(args []string) int {
 			noun = "command"
 		}
 		fmt.Printf("runbox: running %d %s, logs in %s\n", len(cmds), noun, shown)
-		progMu.Lock()
-		prog = newProgress(os.Stdout, opts, dir, len(cmds))
-		progMu.Unlock()
 	}
+	progMu.Lock()
+	prog = newProgress(os.Stdout, opts, dir, len(cmds), *tail)
+	progMu.Unlock()
 	start := time.Now()
 	results := runAll(ctx, force, dir, *shell, time.Duration(*timeout)*time.Second, cmds, getProg())
 	getProg().stop()
@@ -229,7 +229,8 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "runbox:", err)
 		return 1
 	}
-	failed := printReport(os.Stdout, dir, results, *tail, wall, opts)
+	// Log tails were printed as their commands finished.
+	failed := printReport(os.Stdout, dir, results, 0, wall, opts)
 	if sig := received.Load(); sig != 0 {
 		return 128 + int(sig) // conventional "killed by signal" exit status
 	}

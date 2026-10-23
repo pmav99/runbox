@@ -295,6 +295,9 @@ func TestPrintReportTableAndClipping(t *testing.T) {
 	var out strings.Builder
 	printReport(&out, dir, results, 15, 3*time.Second, outputOptions{tty: true, paths: pathsBase})
 	s := out.String()
+	if !strings.HasPrefix(s, "\n") {
+		t.Errorf("terminal recap needs a blank line before the table:\n%s", s)
+	}
 	for _, want := range []string{"a:   OK", "2.5s", "SIGNALED (TERM)", "a.log", "may start mid-line", "195 KB", "in 3.0s"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("report missing %q:\n%s", want, s)
@@ -319,12 +322,97 @@ func TestFormatDuration(t *testing.T) {
 
 func TestProgressNonTTYStreamsFinishedCommands(t *testing.T) {
 	var out strings.Builder
-	p := newProgress(&out, outputOptions{paths: pathsAbs}, "/d", 2)
+	p := newProgress(&out, outputOptions{paths: pathsAbs}, "/d", 2, 0)
 	p.started("a")
 	p.finished(Result{Name: "a", Status: StatusFailed, ExitCode: 4, Log: "a.log", DurationMS: 1200})
 	p.stop()
 	if got, want := out.String(), "a: FAILED exit=4 1.2s /d/a.log\n"; got != want {
 		t.Errorf("got %q; want %q", got, want)
+	}
+}
+
+type notifyingWriter struct {
+	mu sync.Mutex
+	b  strings.Builder
+	ch chan struct{}
+}
+
+func (w *notifyingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.b.Write(p)
+	select {
+	case w.ch <- struct{}{}:
+	default:
+	}
+	return n, err
+}
+
+func (w *notifyingWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.String()
+}
+
+func TestFailureTailAppearsWhileAnotherCommandRuns(t *testing.T) {
+	dir := t.TempDir()
+	gate := filepath.Join(dir, "release")
+	defer os.WriteFile(gate, nil, 0o644)
+	w := &notifyingWriter{ch: make(chan struct{}, 1)}
+	p := newProgress(w, outputOptions{paths: pathsBase}, dir, 2, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	finished := make(chan []Result, 1)
+	go func() {
+		finished <- runAll(ctx, nil, dir, "sh", 0, []Command{
+			{"slow", fmt.Sprintf("while [ ! -e %q ]; do sleep 0.05; done", gate)},
+			{"fast", "printf 'boom\\n'; exit 2"},
+		}, p)
+	}()
+	deadline := time.After(3 * time.Second)
+	for !strings.Contains(w.String(), "boom\n") {
+		select {
+		case <-w.ch:
+		case <-deadline:
+			t.Fatal("failed command's log tail was not printed promptly")
+		}
+	}
+	if s := w.String(); !strings.Contains(s, "--- fast: FAILED exit=2 (1 line in fast.log) ---") {
+		t.Errorf("missing failure heading before slow command finished:\n%s", s)
+	}
+	select {
+	case <-finished:
+		t.Fatal("slow command finished before its release file was created")
+	default:
+	}
+	if err := os.WriteFile(gate, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	results := <-finished
+	p.stop()
+	if s := w.String(); !strings.Contains(s, "boom\n\nslow: OK") {
+		t.Errorf("log tail and next status need a blank line between them:\n%s", s)
+	}
+	var final strings.Builder
+	printReport(&final, dir, results, 0, 0, outputOptions{paths: pathsBase})
+	if strings.Contains(final.String(), "boom") || strings.Count(w.String()+final.String(), "boom\n") != 1 {
+		t.Errorf("failure tail was repeated in final report:\n%s%s", w.String(), final.String())
+	}
+}
+
+func TestProgressTTYShowsFailureWithoutDuplicateStatuses(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bad.log"), []byte("lint error\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	p := newProgress(&out, outputOptions{tty: true, paths: pathsBase}, dir, 2, 2)
+	p.started("slow")
+	p.finished(Result{Name: "bad", Status: StatusFailed, ExitCode: 1, Log: "bad.log"})
+	p.finished(Result{Name: "slow", Status: StatusOK, Log: "slow.log"})
+	p.stop()
+	if s := out.String(); strings.Count(s, "bad: FAILED exit=1") != 1 || !strings.Contains(s, "lint error\n") || strings.Contains(s, "slow: OK") || !strings.Contains(s, "1/2 done, 1 failed") {
+		t.Errorf("terminal output repeated completion statuses or omitted failure:\n%s", s)
 	}
 }
 
@@ -347,7 +435,7 @@ func TestHelpAndBadFlag(t *testing.T) {
 }
 
 func TestStatusLineFitsWidth(t *testing.T) {
-	p := newProgress(io.Discard, outputOptions{tty: true}, "/d", 6)
+	p := newProgress(io.Discard, outputOptions{tty: true}, "/d", 6, 0)
 	p.stop()
 	names := []string{"alpha(5s)", "bravo(5s)", "charlie(5s)", "delta(5s)", "echo(5s)", "slow(5s)"}
 	for _, w := range []int{20, 40, 60, 80, 200} {
@@ -364,7 +452,7 @@ func TestStatusLineFitsWidth(t *testing.T) {
 }
 
 func TestStatusLineCanceling(t *testing.T) {
-	p := newProgress(io.Discard, outputOptions{tty: true}, "/d", 1)
+	p := newProgress(io.Discard, outputOptions{tty: true}, "/d", 1, 0)
 	p.stop()
 	p.width = func() int { return 100 }
 	p.state = canceling
@@ -423,7 +511,7 @@ func captureStdout(t *testing.T, f func()) string {
 }
 
 func TestStatusLinePaintsFailedCounter(t *testing.T) {
-	p := newProgress(io.Discard, outputOptions{tty: true, color: true}, "/d", 3)
+	p := newProgress(io.Discard, outputOptions{tty: true, color: true}, "/d", 3, 0)
 	p.stop()
 	p.width = func() int { return 80 }
 	p.done, p.failed = 2, 1
@@ -468,7 +556,7 @@ func TestTailHeaderCountsBlankLines(t *testing.T) {
 }
 
 func TestStatusLineRunningOrderLongestFirst(t *testing.T) {
-	p := newProgress(io.Discard, outputOptions{tty: true}, "/d", 2)
+	p := newProgress(io.Discard, outputOptions{tty: true}, "/d", 2, 0)
 	p.stop()
 	now := time.Now()
 	p.running["a"] = now

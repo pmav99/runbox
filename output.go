@@ -147,27 +147,30 @@ const (
 )
 
 // progress shows what is happening while commands run. On a terminal it keeps
-// one updating status line; otherwise it prints one line per command as it
-// finishes. Completion order is nondeterministic: results.json is the ordered
-// record. All methods are safe on a nil *progress.
+// one updating status line and prints unsuccessful log tails immediately.
+// Piped output prints a permanent status line for each completion. Completion
+// order is nondeterministic: results.json is the ordered record. All methods
+// are safe on a nil *progress.
 type progress struct {
-	mu      sync.Mutex
-	w       io.Writer
-	opts    outputOptions
-	dir     string
-	total   int
-	done    int
-	failed  int
-	running map[string]time.Time
-	state   cancelState
-	width   func() int // current terminal width; re-read on every draw
-	stopCh  chan struct{}
-	wg      sync.WaitGroup
+	mu        sync.Mutex
+	w         io.Writer
+	opts      outputOptions
+	dir       string
+	total     int
+	done      int
+	failed    int
+	running   map[string]time.Time
+	state     cancelState
+	width     func() int // current terminal width; re-read on every draw
+	tail      int
+	afterTail bool // separate a piped log tail from the next permanent status
+	stopCh    chan struct{}
+	wg        sync.WaitGroup
 }
 
-func newProgress(w io.Writer, opts outputOptions, dir string, total int) *progress {
-	p := &progress{w: w, opts: opts, dir: dir, total: total, running: map[string]time.Time{}, width: func() int { return termWidth(w) }, stopCh: make(chan struct{})}
-	if opts.tty {
+func newProgress(w io.Writer, opts outputOptions, dir string, total, tail int) *progress {
+	p := &progress{w: w, opts: opts, dir: dir, total: total, tail: tail, running: map[string]time.Time{}, width: func() int { return termWidth(w) }, stopCh: make(chan struct{})}
+	if opts.tty && !opts.quiet {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
@@ -195,7 +198,9 @@ func (p *progress) started(name string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.running[name] = time.Now()
-	p.draw()
+	if !p.opts.quiet {
+		p.draw()
+	}
 }
 
 func (p *progress) finished(r Result) {
@@ -209,15 +214,29 @@ func (p *progress) finished(r Result) {
 	if r.Status != StatusOK && r.Status != StatusCanceled {
 		p.failed++
 	}
+	if p.opts.quiet {
+		if r.Status != StatusOK && p.tail > 0 {
+			printLogTail(p.w, p.dir, r, p.tail, p.opts)
+		}
+		return
+	}
 	if p.opts.tty {
-		if p.state != running_ {
-			// Say how each command died while the shutdown is in progress.
-			fmt.Fprintf(p.w, "\r\x1b[2K%s: %s %s\n", r.Name, p.opts.paintStatus(r, describe(r)), formatDuration(resultDuration(r)))
+		if r.Status != StatusOK && p.tail > 0 {
+			fmt.Fprint(p.w, "\r\x1b[2K")
+			printLogTail(p.w, p.dir, r, p.tail, p.opts)
 		}
 		p.draw()
 		return
 	}
-	fmt.Fprintf(p.w, "%s: %s %s %s\n", r.Name, describe(r), formatDuration(resultDuration(r)), p.opts.path(p.dir, r.Log))
+	if p.afterTail {
+		fmt.Fprintln(p.w)
+		p.afterTail = false
+	}
+	fmt.Fprintf(p.w, "%s: %s %s %s\n", r.Name, p.opts.paintStatus(r, describe(r)), formatDuration(resultDuration(r)), p.opts.pathLink(p.dir, r.Log))
+	if r.Status != StatusOK && p.tail > 0 {
+		printLogTail(p.w, p.dir, r, p.tail, p.opts)
+		p.afterTail = true
+	}
 }
 
 // cancel tells the user that shutdown is underway (or being forced).
@@ -231,7 +250,14 @@ func (p *progress) cancel(s cancelState) {
 		return
 	}
 	p.state = s
+	if p.opts.quiet {
+		return
+	}
 	if !p.opts.tty {
+		if p.afterTail {
+			fmt.Fprintln(p.w)
+			p.afterTail = false
+		}
 		fmt.Fprintln(p.w, "runbox: "+cancelMessage(s))
 		return
 	}
@@ -247,7 +273,7 @@ func cancelMessage(s cancelState) string {
 
 // draw redraws the status line. Callers hold p.mu.
 func (p *progress) draw() {
-	if !p.opts.tty {
+	if !p.opts.tty || p.opts.quiet {
 		return
 	}
 	head := fmt.Sprintf("runbox: %d/%d done", p.done, p.total)
@@ -324,15 +350,15 @@ func (p *progress) stop() {
 	}
 	close(p.stopCh)
 	p.wg.Wait()
-	if p.opts.tty {
+	if p.opts.tty && !p.opts.quiet {
 		fmt.Fprint(p.w, "\r\x1b[2K")
 	}
 }
 
-// printReport writes the final report: on a terminal an aligned table with one
-// row per command; then the tail of every unsuccessful command's log, so no
-// follow-up read is needed; then a summary line. It reports whether any
-// command was unsuccessful. wall is the elapsed time of the whole run.
+// printReport writes the final recap and summary. A positive tail also prints
+// unsuccessful log tails, for callers that have not streamed them already.
+// It reports whether any command was unsuccessful. wall is the elapsed time
+// of the whole run.
 func printReport(w io.Writer, dir string, results []Result, tail int, wall time.Duration, opts outputOptions) (failed bool) {
 	var ok, canceled int
 	for _, r := range results {
@@ -347,40 +373,12 @@ func printReport(w io.Writer, dir string, results []Result, tail int, wall time.
 		return false
 	}
 	if opts.tty && !opts.quiet {
+		fmt.Fprintln(w)
 		printTable(w, dir, results, opts)
 	}
 	for _, r := range results {
-		if r.Status == StatusOK || tail == 0 {
-			continue
-		}
-		text, clipped, size, totalLines, err := readTail(filepath.Join(dir, r.Log), tail, tailByteLimit(tail))
-		what := opts.link(filepath.Join(dir, r.Log), r.Log)
-		if err == nil {
-			shown := 0
-			if size > 0 {
-				shown = strings.Count(text, "\n") + 1
-			}
-			if totalLines > int64(shown) {
-				what = fmt.Sprintf("last %d of %d lines in %s", shown, totalLines, what)
-			} else {
-				unit := "lines"
-				if totalLines == 1 {
-					unit = "line"
-				}
-				what = fmt.Sprintf("%d %s in %s", totalLines, unit, what)
-			}
-		}
-		fmt.Fprintf(w, "\n--- %s: %s (%s) ---\n", r.Name, describe(r), what)
-		switch {
-		case err != nil:
-			fmt.Fprintf(w, "(cannot read log: %v)\n", err)
-		case size == 0:
-			fmt.Fprintln(w, "(log is empty)")
-		default:
-			if clipped {
-				fmt.Fprintf(w, "(log is %s; only its last %s were read, so the output may start mid-line)\n", humanBytes(size), humanBytes(tailByteLimit(tail)))
-			}
-			fmt.Fprintln(w, text)
+		if r.Status != StatusOK && tail > 0 {
+			printLogTail(w, dir, r, tail, opts)
 		}
 	}
 	summary := fmt.Sprintf("%d/%d ok, %d failed", ok, len(results), len(results)-ok-canceled)
@@ -389,6 +387,40 @@ func printReport(w io.Writer, dir string, results []Result, tail int, wall time.
 	}
 	fmt.Fprintf(w, "\nsummary: %s in %s; results: %s\n", summary, formatDuration(wall), opts.pathLink(dir, "results.json"))
 	return ok != len(results)
+}
+
+// printLogTail keeps each completion's failure output together, including its
+// line count and any byte-window warning.
+func printLogTail(w io.Writer, dir string, r Result, tail int, opts outputOptions) {
+	text, clipped, size, totalLines, err := readTail(filepath.Join(dir, r.Log), tail, tailByteLimit(tail))
+	what := opts.link(filepath.Join(dir, r.Log), r.Log)
+	if err == nil {
+		shown := 0
+		if size > 0 {
+			shown = strings.Count(text, "\n") + 1
+		}
+		if totalLines > int64(shown) {
+			what = fmt.Sprintf("last %d of %d lines in %s", shown, totalLines, what)
+		} else {
+			unit := "lines"
+			if totalLines == 1 {
+				unit = "line"
+			}
+			what = fmt.Sprintf("%d %s in %s", totalLines, unit, what)
+		}
+	}
+	fmt.Fprintf(w, "\n--- %s: %s (%s) ---\n", r.Name, describe(r), what)
+	switch {
+	case err != nil:
+		fmt.Fprintf(w, "(cannot read log: %v)\n", err)
+	case size == 0:
+		fmt.Fprintln(w, "(log is empty)")
+	default:
+		if clipped {
+			fmt.Fprintf(w, "(log is %s; only its last %s were read, so the output may start mid-line)\n", humanBytes(size), humanBytes(tailByteLimit(tail)))
+		}
+		fmt.Fprintln(w, text)
+	}
 }
 
 func printTable(w io.Writer, dir string, results []Result, opts outputOptions) {

@@ -50,23 +50,26 @@ Options:
 
 ## Output
 
-When stdout is piped (e.g. read by an agent) runbox prints one line per command
-as it finishes (completion order, not argument order), then the last lines of
-every unsuccessful command's log, then a summary with the total wall-clock time.
-On a terminal it instead shows a live `1/4 done, 1 failed — running: build(12s)`
-line and finishes with an aligned, colored table. `results.json` is the stable,
-ordered record in both cases.
+When stdout is piped, runbox prints a status line for each command as it finishes,
+followed immediately by its log tail if it was unsuccessful. On a terminal it
+shows a live `1/4 done, 1 failed — running: build(12s)` line, prints unsuccessful
+log tails as soon as those commands finish, and ends with an aligned, colored
+table of all command statuses. This lets you inspect a fast failure while other
+commands are still running without repeating status lines in the terminal.
+Both styles finish with a summary and total wall-clock time. Completion order
+may vary; `results.json` is the stable, ordered record.
 
 Piped (e.g. `runbox ... | cat`), for `--run 'build=...' --run 'lint=...' --run 'test=...'`:
 
 ```text
 runbox: running 3 commands, logs in /work/.runbox/run-1
 lint: FAILED exit=1 1ms /work/.runbox/run-1/lint.log
-build: OK 1.0s /work/.runbox/run-1/build.log
-test: OK 2.0s /work/.runbox/run-1/test.log
 
 --- lint: FAILED exit=1 (1 line in lint.log) ---
 lint: E501 line too long
+
+build: OK 1.0s /work/.runbox/run-1/build.log
+test: OK 2.0s /work/.runbox/run-1/test.log
 
 summary: 2/3 ok, 1 failed in 2.0s; results: /work/.runbox/run-1/results.json
 ```
@@ -75,12 +78,17 @@ On a terminal, after the live line has been erased:
 
 ```text
 runbox: running 3 commands, logs in .runbox/run-2 (.runbox/latest)
-build: OK             1.0s  build.log
-lint:  FAILED exit=1   1ms  lint.log
-test:  OK             2.0s  test.log
 
 --- lint: FAILED exit=1 (1 line in lint.log) ---
 lint: E501 line too long
+```
+
+The final recap on a terminal is:
+
+```text
+build: OK             1.0s  build.log
+lint:  FAILED exit=1   1ms  lint.log
+test:  OK             2.0s  test.log
 
 summary: 2/3 ok, 1 failed in 2.0s; results: results.json
 ```
