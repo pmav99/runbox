@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -64,17 +65,77 @@ func (o outputOptions) path(dir, name string) string {
 // link renders text as a clickable file:// hyperlink to path (OSC 8) when
 // links are enabled, and as plain text otherwise.
 func (o outputOptions) link(path, text string) string {
+	return o.fileLink(path, text, "")
+}
+
+func (o outputOptions) fileLink(path, text, fragment string) string {
 	if !o.links || !filepath.IsAbs(path) {
 		return text
 	}
 	host, _ := os.Hostname()
-	u := url.URL{Scheme: "file", Host: host, Path: path}
+	u := url.URL{Scheme: "file", Host: host, Path: path, Fragment: fragment}
 	return "\x1b]8;;" + u.String() + "\x1b\\" + text + "\x1b]8;;\x1b\\"
 }
 
 // pathLink is path, linked to the file's absolute location.
 func (o outputOptions) pathLink(dir, name string) string {
 	return o.link(filepath.Join(dir, name), o.path(dir, name))
+}
+
+// sourceLocation matches whitespace-delimited diagnostic locations, optionally
+// preceded by a quote, parenthesis or ANSI color sequence.
+var sourceLocation = regexp.MustCompile(`(?m)(^|[ \t("']|\x1b\[[0-9;:]*m)([^\x00-\x20\x7f:"'<>()]+):([0-9]+)(?::([0-9]+))?`)
+
+// sourceLinks resolves diagnostics against runbox's working directory, not the
+// log directory. Only existing regular files are linked, avoiding false matches
+// such as timestamps. L/C fragments are a convention for editor URL handlers.
+func (o outputOptions) sourceLinks(text string) string {
+	if !o.links {
+		return text
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return text
+	}
+	files := map[string]bool{}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		// Do not nest links emitted by the command itself.
+		if strings.Contains(line, "\x1b]8;") {
+			continue
+		}
+		var out strings.Builder
+		end := 0
+		for _, m := range sourceLocation.FindAllStringSubmatchIndex(line, -1) {
+			// A position must end at punctuation or whitespace, not mid-word.
+			if m[1] < len(line) && strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", rune(line[m[1]])) {
+				continue
+			}
+			path := line[m[4]:m[5]]
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(cwd, path)
+			}
+			exists, checked := files[path]
+			if !checked {
+				st, err := os.Stat(path)
+				exists = err == nil && st.Mode().IsRegular()
+				files[path] = exists
+			}
+			if !exists {
+				continue
+			}
+			fragment := "L" + line[m[6]:m[7]]
+			if m[8] >= 0 {
+				fragment += "C" + line[m[8]:m[9]]
+			}
+			out.WriteString(line[end:m[4]])
+			out.WriteString(o.fileLink(path, line[m[4]:m[1]], fragment))
+			end = m[1]
+		}
+		out.WriteString(line[end:])
+		lines[i] = out.String()
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (o outputOptions) paint(code, s string) string {
@@ -419,7 +480,7 @@ func printLogTail(w io.Writer, dir string, r Result, tail int, opts outputOption
 		if clipped {
 			fmt.Fprintf(w, "(log is %s; only its last %s were read, so the output may start mid-line)\n", humanBytes(size), humanBytes(tailByteLimit(tail)))
 		}
-		fmt.Fprintln(w, text)
+		fmt.Fprintln(w, opts.sourceLinks(text))
 	}
 }
 

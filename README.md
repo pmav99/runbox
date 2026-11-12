@@ -102,6 +102,17 @@ Statuses: `OK`, `FAILED exit=N`, `FAILED (could not start)`, `SIGNALED (TERM)`
 When a log is too large to read in full, the report says so.
 Log line counts include blank lines and are not counts of tool errors.
 
+On a terminal, log paths and source locations in displayed log tails are clickable
+OSC 8 hyperlinks (disabled by `NO_COLOR` or `TERM=dumb`). Source references such as
+`src/main.py:54:21` and `src/main.py:54` link to existing files, with relative paths
+resolved against runbox's working directory. Commands that change directories
+should emit absolute paths for reliable linking.
+
+Source URLs use `file://hostname/absolute/path#L54C21` (or `#L54` without a column).
+Opening at that position requires a terminal URL handler that understands these
+fragments; ordinary file handlers may only open the file. For example, Kitty can
+use `open-actions.conf` to pass `${FILE_PATH}` and `${FRAGMENT}` to an editor.
+
 ### Run directory
 
 Each invocation creates a new directory in `./.runbox`:
