@@ -124,6 +124,28 @@ Each invocation creates a new directory in `./.runbox`:
 * Only the 10 newest runs are kept; older ones are deleted automatically.
 * `results.json` is described [below](#resultsjson).
 
+### Command environment
+
+Each command inherits runbox's environment, plus:
+
+* `RUNBOX_RUN_DIR`: the absolute path of this invocation's run directory, e.g. `/work/.runbox/run-12`.
+* `RUNBOX_NAME`: the command's name, the `NAME` in `--run NAME=COMMAND`.
+
+Use them to keep a command's other output files next to its log:
+
+```bash
+runbox --run 'test=pytest --junitxml="$RUNBOX_RUN_DIR/$RUNBOX_NAME-junit.xml"'
+```
+
+Put the `--run` value in single quotes so that the command's shell expands the variables,
+not yours. Use `RUNBOX_RUN_DIR` rather than `.runbox/latest`: `latest` moves as soon as
+another invocation starts, and `.runbox` is relative to the directory runbox was started in.
+
+* Files written there are deleted along with the run when it is pruned.
+* Don't create `.log` files or `results.json` there; runbox uses those names.
+* Values inherited from an outer runbox are replaced, so nested invocations get their own.
+  runbox itself does not read these variables.
+
 ### results.json
 
 The machine-readable record of a run, for scripts and other tools. It is at

@@ -644,6 +644,30 @@ func TestRunAllTimeout(t *testing.T) {
 	}
 }
 
+func TestCommandEnvironment(t *testing.T) {
+	t.Chdir(t.TempDir())
+	// Values inherited from an outer runbox must be replaced.
+	t.Setenv("RUNBOX_RUN_DIR", "/nonexistent")
+	t.Setenv("RUNBOX_NAME", "outer")
+	// cd checks that RUNBOX_RUN_DIR is absolute.
+	write := `cd / && printf %s "$RUNBOX_NAME" > "$RUNBOX_RUN_DIR/$RUNBOX_NAME.out"`
+	captureStdout(t, func() {
+		if code := run([]string{"--run", "a=" + write, "--run", "b.c=" + write}); code != 0 {
+			t.Errorf("exit code = %d; want 0", code)
+		}
+	})
+	for _, name := range []string{"a", "b.c"} {
+		data, err := os.ReadFile(filepath.Join(".runbox", "run-1", name+".out"))
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		if string(data) != name {
+			t.Errorf("%s: RUNBOX_NAME = %q", name, data)
+		}
+	}
+}
+
 func TestTimeoutDoesNotOverrideCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(100*time.Millisecond, cancel)

@@ -88,7 +88,8 @@ func parseCommands(args []string) ([]Command, error) {
 const usage = `Usage: runbox --run NAME=COMMAND [--run NAME=COMMAND ...]
 
 Runs all commands concurrently through SHELL -c (default sh) and saves each one's output to
-.runbox/run-N/NAME.log (.runbox/latest points at the newest run).
+.runbox/run-N/NAME.log (.runbox/latest points at the newest run). Each command
+gets RUNBOX_RUN_DIR (absolute path of run-N) and RUNBOX_NAME in its environment.
 
 Options:
   --run NAME=COMMAND  command to run; may be repeated

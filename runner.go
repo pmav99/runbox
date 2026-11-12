@@ -44,6 +44,7 @@ type Result struct {
 }
 
 // runAll runs every command concurrently and returns results in input order.
+// dir is passed to the commands as RUNBOX_RUN_DIR, so it should be absolute.
 // A positive timeout limits how long each command may run. Cancelling ctx sends the running commands SIGTERM; closing force (or
 // waiting killGrace) escalates to SIGKILL.
 func runAll(ctx context.Context, force <-chan struct{}, dir, shell string, timeout time.Duration, cmds []Command, p *progress) []Result {
@@ -81,6 +82,8 @@ func runOne(ctx context.Context, force <-chan struct{}, dir, shell string, timeo
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, shell, "-c", c.Shell)
+	// Appended last so they override values inherited from an outer runbox.
+	cmd.Env = append(os.Environ(), "RUNBOX_RUN_DIR="+dir, "RUNBOX_NAME="+c.Name)
 	cmd.Stdout = log // same file for both: output is interleaved in order
 	cmd.Stderr = log
 	// Own process group, so cancellation also reaches the shell's children.
