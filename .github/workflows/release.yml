@@ -35,7 +35,7 @@ jobs:
             tar -C "$stage" -czf "dist/$name.tar.gz" "$name"
             rm -r "$stage"
           done
-          (cd dist && sha256sum * > checksums.txt)
+          (cd dist && sha256sum -- * > checksums.txt)
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
