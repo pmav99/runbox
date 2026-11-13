@@ -9,12 +9,13 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache: false # no dependencies, so there is no go.sum to key a cache on
       - name: Test
         run: go test -race ./...
       - name: Build
@@ -34,7 +35,7 @@ jobs:
             tar -C "$stage" -czf "dist/$name.tar.gz" "$name"
             rm -r "$stage"
           done
-          (cd dist && sha256sum * > checksums.txt)
+          (cd dist && sha256sum -- * > checksums.txt)
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
